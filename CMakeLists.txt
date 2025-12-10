@@ -6,8 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Options
 option(POSTHOG_USE_CURL "Use libcurl for HTTP requests" ON)
-option(POSTHOG_USE_NLOHMANN_JSON "Use nlohmann/json for JSON (otherwise uses built-in simple JSON)" OFF)
 option(POSTHOG_BUILD_EXAMPLES "Build example applications" OFF)
+option(POSTHOG_USE_BUNDLED_JSON "Use bundled nlohmann/json (disable if parent project provides it)" ON)
 
 # Library sources
 set(POSTHOG_SOURCES
@@ -31,6 +31,15 @@ target_include_directories(posthog
         $<INSTALL_INTERFACE:include>
 )
 
+# nlohmann/json handling
+if(POSTHOG_USE_BUNDLED_JSON)
+    # Use bundled json.hpp from include/nlohmann/
+    message(STATUS "PostHog: Using bundled nlohmann/json")
+else()
+    # Parent project must provide nlohmann/json include path
+    message(STATUS "PostHog: Using external nlohmann/json (parent project provides it)")
+endif()
+
 # Platform-specific settings
 if(WIN32)
     target_link_libraries(posthog PRIVATE dbghelp)
@@ -51,18 +60,6 @@ if(POSTHOG_USE_CURL)
         message(STATUS "PostHog: Using libcurl for HTTP")
     else()
         message(STATUS "PostHog: libcurl not found, HTTP disabled (events logged to console)")
-    endif()
-endif()
-
-# Optional: nlohmann/json
-if(POSTHOG_USE_NLOHMANN_JSON)
-    find_package(nlohmann_json QUIET)
-    if(nlohmann_json_FOUND)
-        target_link_libraries(posthog PRIVATE nlohmann_json::nlohmann_json)
-        target_compile_definitions(posthog PRIVATE POSTHOG_USE_NLOHMANN_JSON)
-        message(STATUS "PostHog: Using nlohmann/json")
-    else()
-        message(STATUS "PostHog: nlohmann/json not found, using built-in JSON builder")
     endif()
 endif()
 

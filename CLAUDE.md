@@ -1,0 +1,1 @@
+- before commiting, you MUST update @CHANGELOG.md, then run @scripts/update_version.py only after that you can commit!

@@ -8,6 +8,7 @@
 #include "posthog/stacktrace.h"
 #include "posthog/crash_handler.h"
 
+#include <nlohmann/json.hpp>
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -26,75 +27,11 @@
 #include <sys/utsname.h>
 #endif
 
-// Use nlohmann/json if available, otherwise simple JSON builder
-#ifdef POSTHOG_USE_NLOHMANN_JSON
-#include <nlohmann/json.hpp>
-using json = nlohmann::json;
-#else
-// Simple JSON builder for minimal dependencies
-namespace {
-class SimpleJson {
-public:
-    void set(const std::string& key, const std::string& value) {
-        if (!m_first) m_ss << ",";
-        m_ss << "\"" << escape(key) << "\":\"" << escape(value) << "\"";
-        m_first = false;
-    }
-
-    void set(const std::string& key, int value) {
-        if (!m_first) m_ss << ",";
-        m_ss << "\"" << escape(key) << "\":" << value;
-        m_first = false;
-    }
-
-    void set(const std::string& key, bool value) {
-        if (!m_first) m_ss << ",";
-        m_ss << "\"" << escape(key) << "\":" << (value ? "true" : "false");
-        m_first = false;
-    }
-
-    void setRaw(const std::string& key, const std::string& rawJson) {
-        if (!m_first) m_ss << ",";
-        m_ss << "\"" << escape(key) << "\":" << rawJson;
-        m_first = false;
-    }
-
-    void setObject(const std::string& key, const SimpleJson& obj) {
-        if (!m_first) m_ss << ",";
-        m_ss << "\"" << escape(key) << "\":" << obj.str();
-        m_first = false;
-    }
-
-    std::string str() const {
-        return "{" + m_ss.str() + "}";
-    }
-
-private:
-    std::ostringstream m_ss;
-    bool m_first = true;
-
-    static std::string escape(const std::string& s) {
-        std::ostringstream o;
-        for (char c : s) {
-            switch (c) {
-                case '"': o << "\\\""; break;
-                case '\\': o << "\\\\"; break;
-                case '\n': o << "\\n"; break;
-                case '\r': o << "\\r"; break;
-                case '\t': o << "\\t"; break;
-                default: o << c;
-            }
-        }
-        return o.str();
-    }
-};
-}
-#endif
-
-// HTTP client - use libcurl if available
 #ifdef POSTHOG_USE_CURL
 #include <curl/curl.h>
 #endif
+
+using json = nlohmann::json;
 
 namespace PostHog {
 
@@ -149,7 +86,6 @@ public:
         OSVERSIONINFOEX osvi;
         ZeroMemory(&osvi, sizeof(OSVERSIONINFOEX));
         osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEX);
-        // GetVersionEx is deprecated but works for basic version info
         #pragma warning(suppress: 4996)
         if (GetVersionEx((OSVERSIONINFO*)&osvi)) {
             std::ostringstream ss;
@@ -162,7 +98,6 @@ public:
     #else
         platformName = "macOS_x64";
     #endif
-        // Get macOS version via sysctl
         FILE* pipe = popen("sw_vers -productVersion 2>/dev/null", "r");
         if (pipe) {
             char buffer[64];
@@ -186,7 +121,6 @@ public:
     void track(const std::string& event, const std::map<std::string, std::string>& properties) {
         if (!enabled || !initialized) return;
 
-#ifdef POSTHOG_USE_NLOHMANN_JSON
         json j;
         j["api_key"] = config.apiKey;
         j["event"] = event;
@@ -203,29 +137,10 @@ public:
         }
 
         j["properties"] = props;
-        std::string jsonStr = j.dump();
-#else
-        SimpleJson props;
-        props.set("$lib", config.appName);
-        props.set("$lib_version", config.appVersion);
-        props.set("platform", platformName);
-        props.set("os_version", osVersion);
-
-        for (const auto& [key, value] : properties) {
-            props.set(key, value);
-        }
-
-        SimpleJson j;
-        j.set("api_key", config.apiKey);
-        j.set("event", event);
-        j.set("distinct_id", distinctId);
-        j.setObject("properties", props);
-        std::string jsonStr = j.str();
-#endif
 
         {
             std::lock_guard<std::mutex> lock(queueMutex);
-            eventQueue.push(jsonStr);
+            eventQueue.push(j.dump());
         }
         queueCondition.notify_one();
 
@@ -240,7 +155,6 @@ public:
 
         auto frames = Stacktrace::captureStructured(15, 2, config.appName);
 
-#ifdef POSTHOG_USE_NLOHMANN_JSON
         json j;
         j["api_key"] = config.apiKey;
         j["event"] = "$exception";
@@ -259,6 +173,7 @@ public:
             props[key] = value;
         }
 
+        // Build $exception_list
         json exceptionList = json::array();
         json exception;
         exception["type"] = errorType;
@@ -289,51 +204,10 @@ public:
 
         props["$exception_list"] = exceptionList;
         j["properties"] = props;
-        std::string jsonStr = j.dump();
-#else
-        // Build frames JSON manually
-        std::ostringstream framesJson;
-        framesJson << "[";
-        bool first = true;
-        for (const auto& frame : frames) {
-            if (!first) framesJson << ",";
-            framesJson << "{\"platform\":\"custom\",\"lang\":\"cpp\",\"function\":\""
-                       << frame.function << "\",\"in_app\":" << (frame.inApp ? "true" : "false")
-                       << ",\"resolved\":true}";
-            first = false;
-        }
-        framesJson << "]";
-
-        std::ostringstream exListJson;
-        exListJson << "[{\"type\":\"" << errorType << "\",\"value\":\""
-                   << errorMessage.substr(0, 500) << "\","
-                   << "\"mechanism\":{\"handled\":true,\"synthetic\":false},"
-                   << "\"stacktrace\":{\"type\":\"raw\",\"frames\":" << framesJson.str() << "}}]";
-
-        SimpleJson props;
-        props.set("$lib", config.appName);
-        props.set("$lib_version", config.appVersion);
-        props.set("platform", platformName);
-        props.set("os_version", osVersion);
-        if (!component.empty()) {
-            props.set("component", component);
-        }
-        for (const auto& [key, value] : additionalProps) {
-            props.set(key, value);
-        }
-        props.setRaw("$exception_list", exListJson.str());
-
-        SimpleJson j;
-        j.set("api_key", config.apiKey);
-        j.set("event", "$exception");
-        j.set("distinct_id", distinctId);
-        j.setObject("properties", props);
-        std::string jsonStr = j.str();
-#endif
 
         {
             std::lock_guard<std::mutex> lock(queueMutex);
-            eventQueue.push(jsonStr);
+            eventQueue.push(j.dump());
         }
         queueCondition.notify_one();
 
@@ -355,7 +229,6 @@ public:
             isoTimestamp = report.timestamp;
         }
 
-#ifdef POSTHOG_USE_NLOHMANN_JSON
         json j;
         j["api_key"] = config.apiKey;
         j["event"] = "$exception";
@@ -376,6 +249,7 @@ public:
             props["exec_path"] = report.execPath;
         }
 
+        // Build $exception_list
         json exceptionList = json::array();
         json exception;
         exception["type"] = report.signalName;
@@ -407,63 +281,10 @@ public:
 
         props["$exception_list"] = exceptionList;
         j["properties"] = props;
-        std::string jsonStr = j.dump();
-#else
-        // Build frames from stacktrace
-        std::ostringstream framesJson;
-        framesJson << "[";
-        std::istringstream ss(report.stacktrace);
-        std::string line;
-        bool first = true;
-        while (std::getline(ss, line)) {
-            if (line.find("0x") != std::string::npos) {
-                if (!first) framesJson << ",";
-                // Escape the line for JSON
-                std::string escaped;
-                for (char c : line) {
-                    if (c == '"') escaped += "\\\"";
-                    else if (c == '\\') escaped += "\\\\";
-                    else escaped += c;
-                }
-                framesJson << "{\"platform\":\"custom\",\"lang\":\"cpp\",\"function\":\""
-                           << escaped << "\",\"in_app\":true,\"resolved\":false}";
-                first = false;
-            }
-        }
-        framesJson << "]";
-
-        std::ostringstream exListJson;
-        exListJson << "[{\"type\":\"" << report.signalName
-                   << "\",\"value\":\"Application crashed (from previous session)\","
-                   << "\"mechanism\":{\"handled\":false,\"synthetic\":false},"
-                   << "\"stacktrace\":{\"type\":\"raw\",\"frames\":" << framesJson.str() << "}}]";
-
-        SimpleJson props;
-        props.set("$lib", config.appName);
-        props.set("$lib_version", config.appVersion);
-        props.set("platform", platformName);
-        props.set("os_version", osVersion);
-        props.set("crash_from_previous_session", true);
-        props.set("crash_timestamp", isoTimestamp);
-        if (!report.loadAddress.empty()) {
-            props.set("load_address", report.loadAddress);
-        }
-        if (!report.execPath.empty()) {
-            props.set("exec_path", report.execPath);
-        }
-        props.setRaw("$exception_list", exListJson.str());
-
-        SimpleJson j;
-        j.set("api_key", config.apiKey);
-        j.set("event", "$exception");
-        j.set("distinct_id", distinctId);
-        j.setObject("properties", props);
-        std::string jsonStr = j.str();
-#endif
 
         {
             std::lock_guard<std::mutex> lock(queueMutex);
-            eventQueue.push(jsonStr);
+            eventQueue.push(j.dump());
         }
         queueCondition.notify_one();
 
@@ -545,7 +366,7 @@ public:
             return;
         }
 
-        std::string url = config.host + "/capture/";
+        std::string url = config.host + "/i/v0/e/";
 
         struct curl_slist* headers = nullptr;
         headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -564,7 +385,6 @@ public:
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
 #else
-        // Fallback: log to console
         std::cout << "[PostHog] Would send: " << eventJson.substr(0, 100) << "..." << std::endl;
 #endif
     }

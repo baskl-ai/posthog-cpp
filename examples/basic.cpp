@@ -1,57 +1,78 @@
 /**
  * @file basic.cpp
  * @brief Basic PostHog C++ SDK usage example
+ *
+ * Usage:
+ *   export POSTHOG_API_KEY=phc_xxx
+ *   ./basic
  */
 
 #include <posthog/posthog.h>
 #include <iostream>
-#include <thread>
-#include <chrono>
+#include <string>
+#include <cstdlib>
+#include <cstring>
 
 int main() {
-    // Configure the client
+    std::cout << "=== PostHog Basic Example ===" << std::endl;
+
+    // Get API key from environment
+    const char* apiKeyEnv = std::getenv("POSTHOG_API_KEY");
+    if (!apiKeyEnv || strlen(apiKeyEnv) == 0) {
+        std::cerr << "Error: POSTHOG_API_KEY environment variable not set" << std::endl;
+        std::cerr << "Usage: export POSTHOG_API_KEY=phc_xxx && ./basic" << std::endl;
+        return 1;
+    }
+
+    std::string apiKey = apiKeyEnv;
+    std::cout << "API Key: " << apiKey.substr(0, 8) << "..." << std::endl;
+
+    // Configure
     PostHog::Config config;
-    config.apiKey = "your_posthog_api_key";  // Replace with your key
-    config.appName = "MyApp";
+    config.apiKey = apiKey;
+    config.appName = "posthog-cpp-example";
     config.appVersion = "1.0.0";
-    config.host = "https://eu.i.posthog.com";  // or https://app.posthog.com
+    config.host = "https://eu.i.posthog.com";
 
-    // Create client
+    // Create and initialize client
     PostHog::Client client(config);
-
-    // Initialize
     if (!client.initialize()) {
         std::cerr << "Failed to initialize PostHog" << std::endl;
         return 1;
     }
 
-    // Install crash handler (optional but recommended)
-    client.installCrashHandler();
+    std::cout << "Distinct ID: " << client.getDistinctId() << std::endl;
 
     // Track events
-    client.track("app_started", {
-        {"version", "1.0.0"},
-        {"platform", "desktop"}
+    std::cout << "\nTracking events..." << std::endl;
+
+    client.track("example_started", {
+        {"sdk", "posthog-cpp"},
+        {"test_type", "basic"}
     });
 
-    // Simulate some work
-    std::cout << "App running..." << std::endl;
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-
-    // Track an error with stacktrace
-    client.trackException("NetworkError", "Connection timeout", "HTTP Client", {
-        {"url", "api.example.com"},
-        {"timeout", "30"}
+    client.track("example_event", {
+        {"string_prop", "hello"},
+        {"number_as_string", "42"}
     });
 
-    // Track completion
-    client.track("app_closed", {
-        {"session_duration", "60"}
+    // Track exception
+    client.trackException("ExampleError", "This is a test error", "example_component", {
+        {"error_code", "123"}
     });
 
-    // Shutdown (flushes events)
+    // Show stacktrace capture
+    std::cout << "\nStacktrace capture:" << std::endl;
+    std::string trace = PostHog::Client::captureStacktrace(5, 0);
+    std::cout << trace << std::endl;
+
+    // Flush and shutdown
+    std::cout << "Flushing events..." << std::endl;
+    client.flush(5000);
     client.shutdown();
 
-    std::cout << "Done!" << std::endl;
+    std::cout << "\n=== Done ===" << std::endl;
+    std::cout << "Check PostHog dashboard for events from 'posthog-cpp-example'" << std::endl;
+
     return 0;
 }
