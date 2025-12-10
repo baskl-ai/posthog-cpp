@@ -273,7 +273,9 @@ namespace Internal {
 
         safeCopy(ptr, "\nSTACKTRACE:\n", remaining);
         ptr += strlen(ptr);
+        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
 
+        // Exception address
         safeCopy(ptr, "  Exception at: 0x", remaining);
         ptr += strlen(ptr);
         remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
@@ -281,6 +283,86 @@ namespace Internal {
         char addrStr[32];
         sprintf(addrStr, "%p\n", exceptionInfo->ExceptionRecord->ExceptionAddress);
         safeCopy(ptr, addrStr, remaining);
+        ptr += strlen(ptr);
+        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+        // Capture stack trace using CaptureStackBackTrace
+        void* stack[64];
+        WORD frames = CaptureStackBackTrace(0, 64, stack, NULL);
+
+        // Try to symbolize with DbgHelp (best effort)
+        HANDLE process = GetCurrentProcess();
+        SYMBOL_INFO* symbol = (SYMBOL_INFO*)malloc(sizeof(SYMBOL_INFO) + 256);
+        if (symbol) {
+            symbol->MaxNameLen = 255;
+            symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+        }
+
+        IMAGEHLP_LINE64 line;
+        line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+
+        for (WORD i = 0; i < frames && remaining > 80; i++) {
+            safeCopy(ptr, "  ", remaining);
+            ptr += strlen(ptr);
+            remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+            // Try to get symbol name
+            if (symbol && SymFromAddr(process, (DWORD64)stack[i], 0, symbol)) {
+                // Got symbol name
+                safeCopy(ptr, symbol->Name, remaining);
+                ptr += strlen(ptr);
+                remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+                // Try to get file and line
+                DWORD displacement = 0;
+                if (SymGetLineFromAddr64(process, (DWORD64)stack[i], &displacement, &line)) {
+                    safeCopy(ptr, " (", remaining);
+                    ptr += strlen(ptr);
+                    remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+                    // Extract filename from full path
+                    const char* filename = line.FileName;
+                    const char* lastSlash = strrchr(filename, '\\');
+                    if (lastSlash) filename = lastSlash + 1;
+
+                    safeCopy(ptr, filename, remaining);
+                    ptr += strlen(ptr);
+                    remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+                    safeCopy(ptr, ":", remaining);
+                    ptr += strlen(ptr);
+                    remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+                    char lineStr[16];
+                    safeItoa(line.LineNumber, lineStr, sizeof(lineStr));
+                    safeCopy(ptr, lineStr, remaining);
+                    ptr += strlen(ptr);
+                    remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+                    safeCopy(ptr, ")", remaining);
+                    ptr += strlen(ptr);
+                    remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+                }
+
+                safeCopy(ptr, " [0x", remaining);
+                ptr += strlen(ptr);
+                remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+                sprintf(addrStr, "%p]\n", stack[i]);
+                safeCopy(ptr, addrStr, remaining);
+            } else {
+                // Symbol not found, just print address
+                sprintf(addrStr, "0x%p\n", stack[i]);
+                safeCopy(ptr, addrStr, remaining);
+            }
+
+            ptr += strlen(ptr);
+            remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+        }
+
+        if (symbol) {
+            free(symbol);
+        }
 
         HANDLE hFile = CreateFileA(g_crashFilePath, GENERIC_WRITE, 0, NULL,
                                     CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -333,6 +415,11 @@ inline bool install(const std::string& crashDir) {
     GetModuleFileNameA(NULL, exePath, sizeof(exePath));
     Internal::safeCopy(Internal::g_execPath, exePath, sizeof(Internal::g_execPath));
     Internal::g_loadAddress = reinterpret_cast<unsigned long>(GetModuleHandle(NULL));
+
+    // Initialize symbol handler for better stack traces (best effort, ignore errors)
+    HANDLE process = GetCurrentProcess();
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+    SymInitialize(process, NULL, TRUE);
 #else
     mkdir(crashDir.c_str(), 0755);
     std::string crashFile = crashDir + "/pending_crash.txt";

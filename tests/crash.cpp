@@ -47,8 +47,13 @@ int main(int argc, char* argv[]) {
         std::cout << "API Key: " << apiKey.substr(0, 8) << "..." << std::endl;
     }
 
-    // Use temp directory for crash reports
+    // Use platform-specific temp directory for crash reports
+#ifdef _WIN32
+    const char* tempEnv = std::getenv("TEMP");
+    std::string crashDir = std::string(tempEnv ? tempEnv : "C:/Windows/Temp") + "/posthog_crash_test";
+#else
     std::string crashDir = "/tmp/posthog_crash_test";
+#endif
     std::cout << "Crash dir: " << crashDir << std::endl;
 
     bool checkMode = (argc > 1 && strcmp(argv[1], "check") == 0);
@@ -123,7 +128,11 @@ int main(int argc, char* argv[]) {
         std::cout << "Crash handler: " << PostHog::CrashHandler::getCrashFilePath() << std::endl;
 
         // Wait then crash
-        sleep(2);
+#ifdef _WIN32
+        Sleep(2000);  // Windows Sleep in milliseconds
+#else
+        sleep(2);     // Unix sleep in seconds
+#endif
         crashFunction();
 
         std::cout << "ERROR: Should not reach here!" << std::endl;

@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.16)
-project(posthog-cpp VERSION 1.0.0 LANGUAGES CXX)
+project(posthog-cpp VERSION 1.0.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Options
 option(POSTHOG_USE_CURL "Use libcurl for HTTP requests" ON)
-option(POSTHOG_BUILD_EXAMPLES "Build example applications" OFF)
+option(POSTHOG_BUILD_TESTS "Build test applications" OFF)
 option(POSTHOG_USE_BUNDLED_JSON "Use bundled nlohmann/json (disable if parent project provides it)" ON)
 
 # Library sources
@@ -53,19 +53,62 @@ endif()
 
 # Optional: libcurl
 if(POSTHOG_USE_CURL)
-    find_package(CURL QUIET)
-    if(CURL_FOUND)
-        target_link_libraries(posthog PRIVATE CURL::libcurl)
+    # Check if libcurl_static target exists (from FetchContent in parent project)
+    if(TARGET libcurl_static)
+        target_link_libraries(posthog PRIVATE libcurl_static)
         target_compile_definitions(posthog PRIVATE POSTHOG_USE_CURL)
-        message(STATUS "PostHog: Using libcurl for HTTP")
+        message(STATUS "PostHog: Using libcurl (FetchContent)")
     else()
-        message(STATUS "PostHog: libcurl not found, HTTP disabled (events logged to console)")
+        # Try to find system libcurl
+        find_package(CURL QUIET)
+        if(CURL_FOUND)
+            target_link_libraries(posthog PRIVATE CURL::libcurl)
+            target_compile_definitions(posthog PRIVATE POSTHOG_USE_CURL)
+            message(STATUS "PostHog: Using libcurl (system)")
+        else()
+            message(STATUS "PostHog: libcurl not found, HTTP disabled (events logged to console)")
+        endif()
     endif()
 endif()
 
-# Examples
-if(POSTHOG_BUILD_EXAMPLES)
-    add_subdirectory(examples)
+# Tests
+if(POSTHOG_BUILD_TESTS)
+    # If curl is not already provided by parent project, fetch it for tests
+    if(NOT TARGET libcurl_static AND NOT TARGET CURL::libcurl)
+        message(STATUS "PostHog Tests: Fetching libcurl via FetchContent")
+        include(FetchContent)
+        FetchContent_Declare(
+            curl
+            URL https://github.com/curl/curl/releases/download/curl-8_5_0/curl-8.5.0.tar.gz
+        )
+        set(BUILD_CURL_EXE OFF CACHE INTERNAL "")
+        set(BUILD_SHARED_LIBS OFF CACHE INTERNAL "")
+        set(BUILD_TESTING OFF CACHE INTERNAL "")
+        set(CURL_DISABLE_FTP ON CACHE INTERNAL "")
+        set(CURL_DISABLE_LDAP ON CACHE INTERNAL "")
+        set(CURL_USE_LIBSSH2 OFF CACHE INTERNAL "")
+        if(APPLE)
+            set(CURL_USE_SECTRANSP ON CACHE INTERNAL "")
+            set(CURL_USE_OPENSSL OFF CACHE INTERNAL "")
+        elseif(WIN32)
+            set(CURL_USE_SCHANNEL ON CACHE INTERNAL "")
+            set(CURL_USE_OPENSSL OFF CACHE INTERNAL "")
+        else()
+            set(CURL_USE_OPENSSL ON CACHE INTERNAL "")
+        endif()
+        FetchContent_MakeAvailable(curl)
+
+        # Now libcurl_static target exists, link it to posthog
+        if(TARGET libcurl_static)
+            target_link_libraries(posthog PRIVATE libcurl_static)
+            target_compile_definitions(posthog PRIVATE POSTHOG_USE_CURL)
+            message(STATUS "PostHog: Using libcurl for tests (FetchContent)")
+        endif()
+    else()
+        message(STATUS "PostHog Tests: Using curl provided by parent project")
+    endif()
+
+    add_subdirectory(tests)
 endif()
 
 # Installation

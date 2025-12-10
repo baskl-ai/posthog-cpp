@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.0.1] - 2024-12-10
+
+### Added
+- Windows DbgHelp symbolization for crash reports (function names and line numbers)
+- Comprehensive testing documentation with symbolization guides
+- Platform-specific temp directory handling (%TEMP% on Windows, /tmp on Unix)
+
+### Changed
+- Renamed examples/ → tests/ for clarity
+- CMake option: POSTHOG_BUILD_EXAMPLES → POSTHOG_BUILD_TESTS
+- Improved curl detection: check FetchContent target before system curl
+- Fetch curl only for tests if parent project doesn't provide it
+
+### Fixed
+- Windows stacktrace now captures full call stack (CaptureStackBackTrace)
+- Curl integration works when posthog-cpp is used via FetchContent
+
 ## [1.0.0] - 2024-12-10
 
 ### Added

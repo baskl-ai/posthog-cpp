@@ -1,1 +1,2 @@
-- before commiting, you MUST update @CHANGELOG.md, then run @scripts/update_version.py only after that you can commit!
+- before commiting, you MUST check tests inside examples, then MUST update @CHANGELOG.md, then MUST run @scripts/update_version.py only after that you can commit!
+- Looking back in your mind, think about what you'd do to take care of your future self
