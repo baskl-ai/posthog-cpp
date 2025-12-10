@@ -1,0 +1,22 @@
+# Build
+build/
+cmake-build-*/
+
+# IDE
+.idea/
+.vscode/
+*.xcodeproj/
+*.xcworkspace/
+
+# Compiled
+*.o
+*.a
+*.lib
+*.dll
+*.dylib
+*.so
+*.exe
+
+# OS
+.DS_Store
+Thumbs.db
