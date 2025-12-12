@@ -301,6 +301,10 @@ def main():
         help="Path to executable/plugin binary (with debug symbols)"
     )
     parser.add_argument(
+        "--dsym", "-d",
+        help="Path to dSYM bundle (macOS). Auto-detected if not specified."
+    )
+    parser.add_argument(
         "--load-addr", "-l",
         help="Override load address (hex, e.g., 0x104504000)"
     )
@@ -311,6 +315,49 @@ def main():
     if not os.path.exists(args.binary):
         print(f"Error: Binary not found: {args.binary}", file=sys.stderr)
         sys.exit(1)
+
+    # Auto-detect dSYM on macOS for better symbolization
+    effective_binary = args.binary
+    if platform.system() == "Darwin":
+        dsym_binary = None
+        if args.dsym:
+            # User-specified dSYM
+            dsym_path = Path(args.dsym)
+            if dsym_path.suffix == ".dSYM" and dsym_path.is_dir():
+                binary_name = Path(args.binary).name
+                dwarf_path = dsym_path / "Contents" / "Resources" / "DWARF" / binary_name
+                if dwarf_path.exists():
+                    dsym_binary = str(dwarf_path)
+                    print(f"Using dSYM: {args.dsym}")
+        else:
+            # Try to auto-detect dSYM next to binary
+            binary_path = Path(args.binary)
+            possible_dsyms = []
+
+            # For .plugin bundles: Plugin.plugin/Contents/MacOS/Binary -> Plugin.plugin.dSYM
+            if ".plugin" in str(binary_path):
+                # Find the .plugin directory
+                parts = binary_path.parts
+                for i, part in enumerate(parts):
+                    if part.endswith(".plugin"):
+                        plugin_path = Path(*parts[:i+1])
+                        possible_dsyms.append(plugin_path.with_suffix(".plugin.dSYM"))
+                        break
+
+            # Also check next to the binary itself
+            possible_dsyms.append(binary_path.parent / (binary_path.name + ".dSYM"))
+
+            for dsym_path in possible_dsyms:
+                if dsym_path.exists() and dsym_path.is_dir():
+                    binary_name = binary_path.name
+                    dwarf_path = dsym_path / "Contents" / "Resources" / "DWARF" / binary_name
+                    if dwarf_path.exists():
+                        dsym_binary = str(dwarf_path)
+                        print(f"Auto-detected dSYM: {dsym_path}")
+                        break
+
+        if dsym_binary:
+            effective_binary = dsym_binary
 
     # Check symbolizer available
     symbolizer = find_symbolizer()
@@ -327,7 +374,7 @@ def main():
 
     if args.addr:
         # Single address mode
-        symbol = symbolize_address(args.binary, args.load_addr, args.addr)
+        symbol = symbolize_address(effective_binary, args.load_addr, args.addr)
         print(f"Address: {args.addr}")
         print(f"Symbol: {symbol or '(no symbol)'}")
 
@@ -335,7 +382,7 @@ def main():
         # Clipboard mode (macOS)
         print("Reading JSON from clipboard...")
         crash_data = parse_exception_list_clipboard()
-        symbolize_crash(crash_data, args.binary, args.load_addr)
+        symbolize_crash(crash_data, effective_binary, args.load_addr)
 
     elif args.json:
         if args.json == '-':
@@ -345,12 +392,12 @@ def main():
         else:
             # File mode
             crash_data = parse_exception_list(args.json)
-        symbolize_crash(crash_data, args.binary, args.load_addr)
+        symbolize_crash(crash_data, effective_binary, args.load_addr)
 
     elif args.crash:
         # Crash file mode
         crash_data = parse_crash_file(args.crash)
-        symbolize_crash(crash_data, args.binary, args.load_addr)
+        symbolize_crash(crash_data, effective_binary, args.load_addr)
 
     else:
         parser.print_help()
