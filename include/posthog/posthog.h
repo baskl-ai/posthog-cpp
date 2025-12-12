@@ -28,9 +28,9 @@
 #define POSTHOG_H
 
 #define POSTHOG_VERSION_MAJOR 1
-#define POSTHOG_VERSION_MINOR 0
-#define POSTHOG_VERSION_PATCH 1
-#define POSTHOG_VERSION "1.0.1"
+#define POSTHOG_VERSION_MINOR 1
+#define POSTHOG_VERSION_PATCH 0
+#define POSTHOG_VERSION "1.1.0"
 
 #include <string>
 #include <map>
@@ -148,6 +148,17 @@ public:
      * @param crashDir Custom crash directory (uses config if empty)
      */
     void installCrashHandler(const std::string& crashDir = "");
+
+    /**
+     * @brief Set metadata to include with crash reports
+     *
+     * Saves metadata to disk so it can be included when sending crash reports
+     * from previous sessions. Call this after initialization with all relevant
+     * context (build info, license info, etc.).
+     *
+     * @param metadata Key-value pairs to include in crash reports
+     */
+    void setCrashMetadata(const std::map<std::string, std::string>& metadata);
 
     /**
      * @brief Flush pending events

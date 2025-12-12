@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0] - 2024-12-12
+
+### Added
+- `setCrashMetadata()` method to include custom properties in crash reports
+- `CrashHandler::saveMetadata()` / `loadMetadata()` for persistent crash context
+- Crash reports now include metadata from previous session (build info, license, etc.)
+
 ## [1.0.1] - 2024-12-10
 
 ### Added

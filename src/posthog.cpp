@@ -249,6 +249,12 @@ public:
             props["exec_path"] = report.execPath;
         }
 
+        // Load and add custom metadata from previous session
+        auto metadata = CrashHandler::loadMetadata();
+        for (const auto& [key, value] : metadata.properties) {
+            props[key] = value;
+        }
+
         // Build $exception_list
         json exceptionList = json::array();
         json exception;
@@ -441,6 +447,22 @@ void Client::installCrashHandler(const std::string& crashDir) {
         std::cout << "[PostHog] Found crash report: " << report->signalName << std::endl;
         m_impl->trackCrashReport(*report);
         CrashHandler::clearPendingReport();
+        CrashHandler::clearMetadata();
+    }
+}
+
+void Client::setCrashMetadata(const std::map<std::string, std::string>& metadata) {
+    if (!CrashHandler::isInstalled()) {
+        std::cerr << "[PostHog] Warning: setCrashMetadata called before installCrashHandler" << std::endl;
+        return;
+    }
+
+    CrashHandler::Metadata md;
+    md.properties = metadata;
+    if (CrashHandler::saveMetadata(md)) {
+        std::cout << "[PostHog] Crash metadata saved (" << metadata.size() << " properties)" << std::endl;
+    } else {
+        std::cerr << "[PostHog] Failed to save crash metadata" << std::endl;
     }
 }
 

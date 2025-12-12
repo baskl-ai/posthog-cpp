@@ -20,6 +20,7 @@
 #define POSTHOG_CRASH_HANDLER_H
 
 #include <string>
+#include <map>
 #include <optional>
 #include <fstream>
 #include <ctime>
@@ -55,6 +56,14 @@ struct Report {
     std::string platform;        ///< OS info
     std::string loadAddress;     ///< Load address for symbolication
     std::string execPath;        ///< Path to executable
+};
+
+/**
+ * @brief Additional metadata to include with crash reports
+ * @details Saved separately from crash file (can use malloc) and loaded when sending report
+ */
+struct Metadata {
+    std::map<std::string, std::string> properties;  ///< Custom properties to include
 };
 
 namespace Internal {
@@ -559,6 +568,97 @@ inline std::string getCrashFilePath() {
  */
 inline bool isInstalled() {
     return Internal::g_installed;
+}
+
+/**
+ * @brief Get metadata file path (based on crash file path)
+ */
+inline std::string getMetadataFilePath() {
+    std::string crashPath = Internal::g_crashFilePath;
+    if (crashPath.empty()) return "";
+
+    // Replace pending_crash.txt with crash_metadata.txt
+    size_t pos = crashPath.rfind("pending_crash.txt");
+    if (pos != std::string::npos) {
+        return crashPath.substr(0, pos) + "crash_metadata.txt";
+    }
+    return crashPath + ".metadata";
+}
+
+/**
+ * @brief Save metadata to file for use in crash reports
+ * @details Call this after initializing analytics with all relevant properties.
+ *          The metadata will be included when sending crash reports from previous sessions.
+ * @param metadata Metadata to save
+ * @return true if saved successfully
+ */
+inline bool saveMetadata(const Metadata& metadata) {
+    std::string metadataPath = getMetadataFilePath();
+    if (metadataPath.empty()) return false;
+
+    std::ofstream f(metadataPath);
+    if (!f.is_open()) return false;
+
+    // Simple key=value format (one per line)
+    for (const auto& [key, value] : metadata.properties) {
+        // Escape newlines in values
+        std::string escapedValue = value;
+        size_t pos = 0;
+        while ((pos = escapedValue.find('\n', pos)) != std::string::npos) {
+            escapedValue.replace(pos, 1, "\\n");
+            pos += 2;
+        }
+        f << key << "=" << escapedValue << "\n";
+    }
+
+    return true;
+}
+
+/**
+ * @brief Load metadata from file
+ * @return Metadata if file exists, empty metadata otherwise
+ */
+inline Metadata loadMetadata() {
+    Metadata metadata;
+    std::string metadataPath = getMetadataFilePath();
+    if (metadataPath.empty()) return metadata;
+
+    std::ifstream f(metadataPath);
+    if (!f.is_open()) return metadata;
+
+    std::string line;
+    while (std::getline(f, line)) {
+        size_t eqPos = line.find('=');
+        if (eqPos != std::string::npos) {
+            std::string key = line.substr(0, eqPos);
+            std::string value = line.substr(eqPos + 1);
+
+            // Unescape newlines
+            size_t pos = 0;
+            while ((pos = value.find("\\n", pos)) != std::string::npos) {
+                value.replace(pos, 2, "\n");
+                pos += 1;
+            }
+
+            metadata.properties[key] = value;
+        }
+    }
+
+    return metadata;
+}
+
+/**
+ * @brief Clear metadata file after crash report is sent
+ */
+inline void clearMetadata() {
+    std::string metadataPath = getMetadataFilePath();
+    if (metadataPath.empty()) return;
+
+#ifdef _WIN32
+    DeleteFileA(metadataPath.c_str());
+#else
+    unlink(metadataPath.c_str());
+#endif
 }
 
 } // namespace CrashHandler
