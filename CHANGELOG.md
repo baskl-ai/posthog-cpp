@@ -6,6 +6,7 @@
 - `setCrashMetadata()` method to include custom properties in crash reports
 - `CrashHandler::saveMetadata()` / `loadMetadata()` for persistent crash context
 - Crash reports now include metadata from previous session (build info, license, etc.)
+- `scripts/symbolize.py` - cross-platform crash stacktrace symbolizer (atos, llvm-symbolizer, addr2line)
 
 ## [1.0.1] - 2024-12-10
 
