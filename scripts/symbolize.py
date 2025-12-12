@@ -114,6 +114,8 @@ def symbolize_address_addr2line(binary: str, address: str) -> str:
         output = result.stdout.strip()
         if output and "??" not in output:
             return output
+    except FileNotFoundError:
+        pass  # addr2line not installed, silently skip
     except Exception as e:
         print(f"  addr2line error: {e}", file=sys.stderr)
     return None
