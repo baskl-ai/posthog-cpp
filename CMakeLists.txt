@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(posthog-cpp VERSION 1.1.0 LANGUAGES CXX)
+project(posthog-cpp VERSION 1.1.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -43,7 +43,10 @@ endif()
 # Platform-specific settings
 if(WIN32)
     target_link_libraries(posthog PRIVATE dbghelp)
-    target_compile_definitions(posthog PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_definitions(posthog PRIVATE
+        _CRT_SECURE_NO_WARNINGS
+        _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR
+    )
 elseif(APPLE)
     # macOS needs no extra libs for backtrace
 else()

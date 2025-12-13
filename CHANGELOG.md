@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.1] - 2025-12-13
+
+### Fixed
+- Windows crash in `PostHog::Client::Impl::workerLoop()` by adding `_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR` define for MSVC builds
+
 ## [1.1.0] - 2024-12-12
 
 ### Added
