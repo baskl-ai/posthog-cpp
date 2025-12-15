@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:  # Manual trigger from GitHub UI
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux
+          - os: macos-latest
+            name: macOS
+          - os: windows-latest
+            name: Windows
+
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -B build -S . -DPOSTHOG_BUILD_TESTS=ON -DPOSTHOG_USE_CURL=OFF
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Run unit tests
+        run: ctest --test-dir build/tests --output-on-failure -C Release
+
+  build-with-curl:
+    name: Build with CURL (Linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libcurl
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+
+      - name: Configure CMake
+        run: cmake -B build -S . -DPOSTHOG_BUILD_TESTS=ON -DPOSTHOG_USE_CURL=ON
+
+      - name: Build
+        run: cmake --build build --config Release

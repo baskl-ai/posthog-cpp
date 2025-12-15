@@ -78,8 +78,8 @@ endif()
 
 # Tests
 if(POSTHOG_BUILD_TESTS)
-    # If curl is not already provided by parent project, fetch it for tests
-    if(NOT TARGET libcurl_static AND NOT TARGET CURL::libcurl)
+    # Fetch curl for tests only if POSTHOG_USE_CURL is ON and no curl target exists
+    if(POSTHOG_USE_CURL AND NOT TARGET libcurl_static AND NOT TARGET CURL::libcurl)
         message(STATUS "PostHog Tests: Fetching libcurl via FetchContent")
         include(FetchContent)
         FetchContent_Declare(
@@ -109,8 +109,6 @@ if(POSTHOG_BUILD_TESTS)
             target_compile_definitions(posthog PRIVATE POSTHOG_USE_CURL)
             message(STATUS "PostHog: Using libcurl for tests (FetchContent)")
         endif()
-    else()
-        message(STATUS "PostHog Tests: Using curl provided by parent project")
     endif()
 
     add_subdirectory(tests)

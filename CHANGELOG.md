@@ -5,6 +5,8 @@
 ### Added
 - `posthog_cpp_version` property in all events (SDK version tracking)
 - README.md with documentation
+- GitHub Actions CI (build matrix: Windows, macOS, Linux)
+- Unit tests without network (MachineID, Stacktrace, Client init)
 
 ### Changed
 - Combined platform info into single `$os` field (e.g., "Mac OS X arm64 15.5", "Windows x64 10.0.22631")
