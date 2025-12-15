@@ -25,9 +25,18 @@
 } while(0)
 
 TEST(machine_id_not_empty) {
-    std::string id = PostHog::MachineID::get();
+    std::string id = PostHog::MachineID::getHashedMacId();
     CHECK(!id.empty());
-    CHECK(id.length() > 8);  // Should be UUID-like or hex string
+    CHECK(id.length() == 36);  // UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+}
+
+TEST(machine_id_algorithm) {
+    // Test with known MAC value to ensure algorithm is consistent across platforms
+    // Python: uuid.getnode() = 64512903190309
+    // Expected: "5da68340-5f4e-b9d1-f2db-f1533b85c877"
+    uint64_t testNode = 64512903190309ULL;
+    std::string result = PostHog::MachineID::getHashedMacIdFromNode(testNode);
+    CHECK(result == "5da68340-5f4e-b9d1-f2db-f1533b85c877");
 }
 
 TEST(stacktrace_capture) {
@@ -101,12 +110,14 @@ TEST(default_crash_dir) {
 TEST(generate_machine_id) {
     std::string id = PostHog::Client::generateMachineId();
     CHECK(!id.empty());
+    CHECK(id.length() == 36);  // UUID format
 }
 
 int main() {
     std::cout << "=== PostHog Unit Tests ===" << std::endl;
 
     RUN_TEST(machine_id_not_empty);
+    RUN_TEST(machine_id_algorithm);
     RUN_TEST(stacktrace_capture);
     RUN_TEST(stacktrace_structured);
     RUN_TEST(client_init_without_apikey);

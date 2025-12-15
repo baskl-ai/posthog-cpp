@@ -39,9 +39,9 @@
 #define POSTHOG_H
 
 #define POSTHOG_VERSION_MAJOR 1
-#define POSTHOG_VERSION_MINOR 1
-#define POSTHOG_VERSION_PATCH 2
-#define POSTHOG_VERSION "1.1.2"
+#define POSTHOG_VERSION_MINOR 2
+#define POSTHOG_VERSION_PATCH 0
+#define POSTHOG_VERSION "1.2.0"
 
 #include <string>
 #include <map>
@@ -67,6 +67,7 @@ struct Config {
     std::string appName;                 ///< Application name, sent as $lib property
     std::string appVersion;              ///< Application version, sent as $lib_version property
     std::string host = "https://eu.i.posthog.com";  ///< PostHog API host (us.i.posthog.com or eu.i.posthog.com)
+    std::string distinctId;              ///< Custom distinct ID (auto-generated from hardware if empty)
     std::string crashReportsDir;         ///< Custom crash directory (uses platform default if empty)
     int flushIntervalMs = 30000;         ///< Background flush interval in milliseconds
     int flushBatchSize = 10;             ///< Max events per batch (not currently used)
@@ -280,14 +281,23 @@ public:
     /**
      * @brief Generate unique machine identifier
      *
-     * Uses platform-specific hardware IDs:
-     * - macOS: IOPlatformUUID via system_profiler
-     * - Windows: MachineGuid from registry
-     * - Linux: /etc/machine-id or /var/lib/dbus/machine-id
+     * Generates deterministic ID from network adapter MAC address using SHA256.
+     * Compatible with Python's uuid.getnode() algorithm.
      *
      * @return UUID-format string unique to this machine
      */
     static std::string generateMachineId();
+
+    /**
+     * @brief Generate machine ID with file fallback
+     *
+     * If fallbackPath exists, reads ID from file (for persistence across MAC changes).
+     * Otherwise generates new ID and saves to file.
+     *
+     * @param fallbackPath Path to store/read ID
+     * @return UUID-format string
+     */
+    static std::string generateMachineId(const std::string& fallbackPath);
 
 private:
     class Impl;

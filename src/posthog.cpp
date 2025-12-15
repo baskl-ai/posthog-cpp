@@ -64,10 +64,14 @@ public:
     bool initialize() {
         if (initialized) return true;
 
-        // Get machine ID
-        distinctId = MachineID::get();
-        if (distinctId.empty()) {
-            distinctId = "unknown-" + std::to_string(std::time(nullptr));
+        // Use custom distinct ID if provided, otherwise generate from MAC address
+        if (!config.distinctId.empty()) {
+            distinctId = config.distinctId;
+        } else {
+            distinctId = MachineID::getHashedMacId();
+            if (distinctId.empty()) {
+                distinctId = "unknown-" + std::to_string(std::time(nullptr));
+            }
         }
 
         // Detect platform
@@ -521,7 +525,11 @@ std::string Client::getDefaultCrashDir(const std::string& appName) {
 }
 
 std::string Client::generateMachineId() {
-    return MachineID::get();
+    return MachineID::getHashedMacId();
+}
+
+std::string Client::generateMachineId(const std::string& fallbackPath) {
+    return MachineID::getHashedMacIdWithFallback(fallbackPath);
 }
 
 } // namespace PostHog

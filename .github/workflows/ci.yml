@@ -34,6 +34,25 @@ jobs:
       - name: Run unit tests
         run: ctest --test-dir build/tests --output-on-failure -C Release
 
+      - name: Compare C++ and Python MAC ID (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          CPP_ID=$(./build/tests/test_mac_id | grep "Generated hashed MAC ID:" | cut -d' ' -f5)
+          PYTHON_ID=$(python3 -c "import uuid,hashlib; n=uuid.getnode(); m=':'.join(['{:02x}'.format((n>>e)&0xff) for e in range(0,12,2)][::-1]); print(str(uuid.UUID(hashlib.sha256(m.encode()).hexdigest()[:32])))")
+          echo "C++ ID:    $CPP_ID"
+          echo "Python ID: $PYTHON_ID"
+          [ "$CPP_ID" = "$PYTHON_ID" ] && echo "✓ IDs match!" || (echo "✗ IDs don't match!" && exit 1)
+
+      - name: Compare C++ and Python MAC ID (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          CPP_ID=$(./build/tests/Release/test_mac_id.exe | grep "Generated hashed MAC ID:" | cut -d' ' -f5)
+          PYTHON_ID=$(python -c "import uuid,hashlib; n=uuid.getnode(); m=':'.join(['{:02x}'.format((n>>e)&0xff) for e in range(0,12,2)][::-1]); print(str(uuid.UUID(hashlib.sha256(m.encode()).hexdigest()[:32])))")
+          echo "C++ ID:    $CPP_ID"
+          echo "Python ID: $PYTHON_ID"
+          [ "$CPP_ID" = "$PYTHON_ID" ] && echo "✓ IDs match!" || (echo "✗ IDs don't match!" && exit 1)
+
   build-with-curl:
     name: Build with CURL (Linux)
     runs-on: ubuntu-latest

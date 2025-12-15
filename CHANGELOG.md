@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.2.0] - 2025-12-15
+
+### Changed
+- `generateMachineId()` now uses MAC address + SHA256 hash (Python uuid.getnode() compatible)
+- Added `generateMachineId(fallbackPath)` overload for file-based ID persistence
+- Added bundled picosha2.h for SHA256 hashing
+- CI now compares C++ and Python ID generation to ensure compatibility
+
+### Removed
+- Old hardware-based ID generation (IOPlatformUUID, MachineGuid, /etc/machine-id)
+
 ## [1.1.2] - 2025-12-15
 
 ### Added
