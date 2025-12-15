@@ -4,10 +4,15 @@
 
 ### Added
 - `posthog_cpp_version` property in all events (SDK version tracking)
+- README.md with documentation
 
 ### Changed
 - Combined platform info into single `$os` field (e.g., "Mac OS X arm64 15.5", "Windows x64 10.0.22631")
 - Removed separate `platform` and `os_version` fields
+- Default crash directory now uses user-writable paths instead of system paths:
+  - Windows: `%APPDATA%/{appName}/CrashReports`
+  - macOS: `~/Library/Application Support/{appName}/CrashReports`
+  - Linux: `~/.local/share/{appName}/crash_reports`
 
 ### Removed
 - `POSTHOG_USE_BUNDLED_JSON` CMake option (was non-functional, nlohmann/json is always bundled)

@@ -25,6 +25,7 @@
 #include <fstream>
 #include <ctime>
 #include <cstring>
+#include <cstdlib>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -390,19 +391,42 @@ namespace Internal {
 /**
  * @brief Get default crash reports directory for platform
  * @param appName Application name for directory path
- * @return Platform-specific path
+ * @return Platform-specific path (user-writable directory)
+ *
+ * Default paths:
+ * - Windows: %APPDATA%/{appName}/CrashReports
+ * - macOS: ~/Library/Application Support/{appName}/CrashReports
+ * - Linux: ~/.local/share/{appName}/crash_reports
  */
 inline std::string getDefaultCrashDir(const std::string& appName) {
 #ifdef _WIN32
     char path[MAX_PATH];
-    if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_COMMON_APPDATA, NULL, 0, path))) {
+    if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, path))) {
         return std::string(path) + "\\" + appName + "\\CrashReports";
     }
-    return "C:\\ProgramData\\" + appName + "\\CrashReports";
+    // Fallback to APPDATA env var
+    const char* appdata = std::getenv("APPDATA");
+    if (appdata) {
+        return std::string(appdata) + "\\" + appName + "\\CrashReports";
+    }
+    return "C:\\Users\\Public\\" + appName + "\\CrashReports";
 #elif defined(__APPLE__)
-    return "/Library/Application Support/" + appName + "/CrashReports";
+    const char* home = std::getenv("HOME");
+    if (home) {
+        return std::string(home) + "/Library/Application Support/" + appName + "/CrashReports";
+    }
+    return "/tmp/" + appName + "/CrashReports";
 #else
-    return "/var/lib/" + appName + "/crash_reports";
+    const char* home = std::getenv("HOME");
+    if (home) {
+        return std::string(home) + "/.local/share/" + appName + "/crash_reports";
+    }
+    // Fallback to XDG_DATA_HOME
+    const char* xdgData = std::getenv("XDG_DATA_HOME");
+    if (xdgData) {
+        return std::string(xdgData) + "/" + appName + "/crash_reports";
+    }
+    return "/tmp/" + appName + "/crash_reports";
 #endif
 }
 
