@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.2] - 2025-12-15
+
+### Added
+- `posthog_cpp_version` property in all events (SDK version tracking)
+
+### Changed
+- Combined platform info into single `$os` field (e.g., "Mac OS X arm64 15.5", "Windows x64 10.0.22631")
+- Removed separate `platform` and `os_version` fields
+
+### Removed
+- `POSTHOG_USE_BUNDLED_JSON` CMake option (was non-functional, nlohmann/json is always bundled)
+- Added `JSON_SKIP_LIBRARY_VERSION_CHECK` to avoid warnings when parent project uses different nlohmann/json version
+
 ## [1.1.1] - 2025-12-13
 
 ### Fixed

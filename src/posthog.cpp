@@ -8,6 +8,8 @@
 #include "posthog/stacktrace.h"
 #include "posthog/crash_handler.h"
 
+// Skip version check to avoid warnings when parent project uses different nlohmann/json version
+#define JSON_SKIP_LIBRARY_VERSION_CHECK
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include <sstream>
@@ -42,8 +44,7 @@ class Client::Impl {
 public:
     Config config;
     std::string distinctId;
-    std::string platformName;
-    std::string osVersion;
+    std::string osInfo;  // Combined "$os" field: "Mac OS X arm64 15.5"
 
     std::atomic<bool> enabled{true};
     std::atomic<bool> initialized{false};
@@ -80,9 +81,25 @@ public:
         return true;
     }
 
+    /**
+     * @brief Detects platform info and stores in platformName as "$os" field
+     *
+     * Format: "OS arch version" (e.g., "Mac OS X arm64 15.5", "Windows x64 10.0.22631")
+     */
     void detectPlatform() {
+        std::string os;
+        std::string arch;
+        std::string version;
+
 #ifdef _WIN32
-        platformName = "Windows";
+        os = "Windows";
+    #if defined(_M_ARM64)
+        arch = "arm64";
+    #elif defined(_M_X64) || defined(_WIN64)
+        arch = "x64";
+    #else
+        arch = "x86";
+    #endif
         OSVERSIONINFOEX osvi;
         ZeroMemory(&osvi, sizeof(OSVERSIONINFOEX));
         osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEX);
@@ -90,32 +107,36 @@ public:
         if (GetVersionEx((OSVERSIONINFO*)&osvi)) {
             std::ostringstream ss;
             ss << osvi.dwMajorVersion << "." << osvi.dwMinorVersion << "." << osvi.dwBuildNumber;
-            osVersion = ss.str();
+            version = ss.str();
         }
 #elif defined(__APPLE__)
+        os = "Mac OS X";
     #if defined(__arm64__)
-        platformName = "macOS_ARM";
+        arch = "arm64";
     #else
-        platformName = "macOS_x64";
+        arch = "x86_64";
     #endif
         FILE* pipe = popen("sw_vers -productVersion 2>/dev/null", "r");
         if (pipe) {
             char buffer[64];
             if (fgets(buffer, sizeof(buffer), pipe)) {
-                osVersion = buffer;
-                if (!osVersion.empty() && osVersion.back() == '\n') {
-                    osVersion.pop_back();
+                version = buffer;
+                if (!version.empty() && version.back() == '\n') {
+                    version.pop_back();
                 }
             }
             pclose(pipe);
         }
 #else
-        platformName = "Linux";
+        os = "Linux";
         struct utsname uts;
         if (uname(&uts) == 0) {
-            osVersion = std::string(uts.release);
+            arch = uts.machine;  // x86_64, aarch64, etc.
+            version = uts.release;
         }
 #endif
+        // Combine into single string: "Mac OS X arm64 15.5"
+        osInfo = os + " " + arch + " " + version;
     }
 
     void track(const std::string& event, const std::map<std::string, std::string>& properties) {
@@ -129,8 +150,8 @@ public:
         json props;
         props["$lib"] = config.appName;
         props["$lib_version"] = config.appVersion;
-        props["platform"] = platformName;
-        props["os_version"] = osVersion;
+        props["$os"] = osInfo;
+        props["posthog_cpp_version"] = POSTHOG_VERSION;
 
         for (const auto& [key, value] : properties) {
             props[key] = value;
@@ -163,8 +184,8 @@ public:
         json props;
         props["$lib"] = config.appName;
         props["$lib_version"] = config.appVersion;
-        props["platform"] = platformName;
-        props["os_version"] = osVersion;
+        props["$os"] = osInfo;
+        props["posthog_cpp_version"] = POSTHOG_VERSION;
         if (!component.empty()) {
             props["component"] = component;
         }
@@ -237,8 +258,8 @@ public:
         json props;
         props["$lib"] = config.appName;
         props["$lib_version"] = config.appVersion;
-        props["platform"] = platformName;
-        props["os_version"] = osVersion;
+        props["$os"] = osInfo;
+        props["posthog_cpp_version"] = POSTHOG_VERSION;
         props["crash_from_previous_session"] = true;
         props["crash_timestamp"] = isoTimestamp;
 

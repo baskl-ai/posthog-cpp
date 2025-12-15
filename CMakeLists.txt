@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(posthog-cpp VERSION 1.1.1 LANGUAGES CXX)
+project(posthog-cpp VERSION 1.1.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,7 +7,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Options
 option(POSTHOG_USE_CURL "Use libcurl for HTTP requests" ON)
 option(POSTHOG_BUILD_TESTS "Build test applications" OFF)
-option(POSTHOG_USE_BUNDLED_JSON "Use bundled nlohmann/json (disable if parent project provides it)" ON)
 
 # Library sources
 set(POSTHOG_SOURCES
@@ -31,20 +30,23 @@ target_include_directories(posthog
         $<INSTALL_INTERFACE:include>
 )
 
-# nlohmann/json handling
-if(POSTHOG_USE_BUNDLED_JSON)
-    # Use bundled json.hpp from include/nlohmann/
-    message(STATUS "PostHog: Using bundled nlohmann/json")
-else()
-    # Parent project must provide nlohmann/json include path
-    message(STATUS "PostHog: Using external nlohmann/json (parent project provides it)")
-endif()
+# nlohmann/json: bundled in include/nlohmann/
+# JSON_SKIP_LIBRARY_VERSION_CHECK is defined in posthog.cpp to avoid
+# version mismatch warnings if parent project uses different version
+
+# Pass library version to code
+target_compile_definitions(posthog PRIVATE
+    POSTHOG_VERSION="${PROJECT_VERSION}"
+)
 
 # Platform-specific settings
 if(WIN32)
     target_link_libraries(posthog PRIVATE dbghelp)
     target_compile_definitions(posthog PRIVATE
         _CRT_SECURE_NO_WARNINGS
+        # Windows-specific compiler flags
+        # _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR: Fix for VS2022 17.10+ breaking change with std::mutex
+        # See: https://github.com/microsoft/STL/issues/4730
         _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR
     )
 elseif(APPLE)
