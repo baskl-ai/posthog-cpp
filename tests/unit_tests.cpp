@@ -6,6 +6,7 @@
 #include <posthog/posthog.h>
 #include <posthog/machine_id.h>
 #include <posthog/stacktrace.h>
+#include <posthog/crash_handler.h>
 #include <iostream>
 #include <cassert>
 
@@ -113,6 +114,63 @@ TEST(generate_machine_id) {
     CHECK(id.length() == 36);  // UUID format
 }
 
+TEST(crash_filter_with_module_addresses) {
+    // Crash with 2+ addresses from our module - should be reported
+    PostHog::CrashHandler::Report report;
+    report.loadAddress = "0x100000000";
+    report.moduleSize = "0x100000";  // 1MB module (0x100000000 - 0x100100000)
+    report.stacktrace = R"(
+  0x100050000
+  0x18bc93584
+  0x100020000
+  0x100030000
+)";
+    CHECK(PostHog::CrashHandler::hasAddressesFromOurModule(report) == true);
+}
+
+TEST(crash_filter_single_address) {
+    // Crash with only 1 address from our module (crash handler) - should be filtered
+    PostHog::CrashHandler::Report report;
+    report.loadAddress = "0x100000000";
+    report.moduleSize = "0x100000";
+    report.stacktrace = R"(
+  0x100050000
+  0x18bc93584
+  0x200000000
+  0x300000000
+)";
+    CHECK(PostHog::CrashHandler::hasAddressesFromOurModule(report) == false);
+}
+
+TEST(crash_filter_no_module_addresses) {
+    // Crash with NO addresses from our module - should be filtered
+    PostHog::CrashHandler::Report report;
+    report.loadAddress = "0x100000000";
+    report.moduleSize = "0x100000";
+    report.stacktrace = R"(
+  0x18bc93584
+  0x200000000
+  0x300000000
+  0x400000000
+)";
+    CHECK(PostHog::CrashHandler::hasAddressesFromOurModule(report) == false);
+}
+
+TEST(crash_filter_no_load_address) {
+    // Crash without load address info - can't filter, assume ours
+    PostHog::CrashHandler::Report report;
+    report.stacktrace = "0x12345678";
+    CHECK(PostHog::CrashHandler::hasAddressesFromOurModule(report) == true);
+}
+
+TEST(crash_filter_no_module_size) {
+    // Crash with load address but no module size - can't filter, assume ours
+    PostHog::CrashHandler::Report report;
+    report.loadAddress = "0x100000000";
+    report.stacktrace = "0x12345678";
+    CHECK(PostHog::CrashHandler::hasAddressesFromOurModule(report) == true);
+}
+
 int main() {
     std::cout << "=== PostHog Unit Tests ===" << std::endl;
 
@@ -125,6 +183,11 @@ int main() {
     RUN_TEST(client_enable_disable);
     RUN_TEST(default_crash_dir);
     RUN_TEST(generate_machine_id);
+    RUN_TEST(crash_filter_with_module_addresses);
+    RUN_TEST(crash_filter_single_address);
+    RUN_TEST(crash_filter_no_module_addresses);
+    RUN_TEST(crash_filter_no_load_address);
+    RUN_TEST(crash_filter_no_module_size);
 
     std::cout << "\n=== All tests passed! ===" << std::endl;
     return 0;

@@ -78,8 +78,19 @@ int main(int argc, char* argv[]) {
         std::cout << "  Timestamp: " << report->timestamp << std::endl;
         std::cout << "  Platform: " << report->platform << std::endl;
         std::cout << "  Load address: " << report->loadAddress << std::endl;
+        std::cout << "  Module size: " << report->moduleSize << std::endl;
         std::cout << "  Exec path: " << report->execPath << std::endl;
         std::cout << "  Stacktrace:\n" << report->stacktrace << std::endl;
+
+        // Test hasAddressesFromOurModule
+        bool isOurCrash = PostHog::CrashHandler::hasAddressesFromOurModule(*report);
+        std::cout << "\n  hasAddressesFromOurModule: " << (isOurCrash ? "YES" : "NO") << std::endl;
+
+        if (!isOurCrash) {
+            std::cout << "  -> Crash is NOT from our module, would be filtered out" << std::endl;
+        } else {
+            std::cout << "  -> Crash IS from our module, would be reported" << std::endl;
+        }
 
         if (!apiKey.empty()) {
             PostHog::Config config;

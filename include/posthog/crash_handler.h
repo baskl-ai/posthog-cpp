@@ -11,7 +11,10 @@
  *   // On next startup:
  *   auto report = PostHog::CrashHandler::loadPendingReport();
  *   if (report.has_value()) {
- *       // Send to analytics
+ *       // Filter out crashes not from our module (e.g. host app crashes)
+ *       if (PostHog::CrashHandler::hasAddressesFromOurModule(*report)) {
+ *           // Send to analytics - this crash involves our code
+ *       }
  *       PostHog::CrashHandler::clearPendingReport();
  *   }
  */
@@ -23,6 +26,7 @@
 #include <map>
 #include <optional>
 #include <fstream>
+#include <sstream>
 #include <ctime>
 #include <cstring>
 #include <cstdlib>
@@ -31,7 +35,9 @@
 #include <windows.h>
 #include <dbghelp.h>
 #include <shlobj.h>
+#include <psapi.h>
 #pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "psapi.lib")
 #else
 #include <signal.h>
 #include <unistd.h>
@@ -41,6 +47,7 @@
 #include <dlfcn.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 #endif
 #endif
 
@@ -56,6 +63,7 @@ struct Report {
     std::string stacktrace;      ///< Raw stacktrace
     std::string platform;        ///< OS info
     std::string loadAddress;     ///< Load address for symbolication
+    std::string moduleSize;      ///< Size of our module (for address range filtering)
     std::string execPath;        ///< Path to executable
 };
 
@@ -72,6 +80,7 @@ namespace Internal {
     static char g_crashBuffer[8192] = {0};
     static bool g_installed = false;
     static unsigned long g_loadAddress = 0;
+    static unsigned long g_moduleSize = 0;  // Size of our module for address filtering
     static char g_execPath[512] = {0};
 
     inline void safeCopy(char* dest, const char* src, size_t maxLen) {
@@ -182,6 +191,16 @@ namespace Internal {
         ptr += strlen(ptr);
         remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
 
+        safeCopy(ptr, "\nMODULE_SIZE: ", remaining);
+        ptr += strlen(ptr);
+        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+        char moduleSizeStr[32];
+        safeUlongToHex(g_moduleSize, moduleSizeStr, sizeof(moduleSizeStr));
+        safeCopy(ptr, moduleSizeStr, remaining);
+        ptr += strlen(ptr);
+        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
         safeCopy(ptr, "\nEXEC_PATH: ", remaining);
         ptr += strlen(ptr);
         remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
@@ -270,6 +289,16 @@ namespace Internal {
         char loadAddrStr[32];
         safeUlongToHex(g_loadAddress, loadAddrStr, sizeof(loadAddrStr));
         safeCopy(ptr, loadAddrStr, remaining);
+        ptr += strlen(ptr);
+        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+        safeCopy(ptr, "\nMODULE_SIZE: ", remaining);
+        ptr += strlen(ptr);
+        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+        char moduleSizeStr[32];
+        safeUlongToHex(g_moduleSize, moduleSizeStr, sizeof(moduleSizeStr));
+        safeCopy(ptr, moduleSizeStr, remaining);
         ptr += strlen(ptr);
         remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
 
@@ -447,7 +476,20 @@ inline bool install(const std::string& crashDir) {
     char exePath[512];
     GetModuleFileNameA(NULL, exePath, sizeof(exePath));
     Internal::safeCopy(Internal::g_execPath, exePath, sizeof(Internal::g_execPath));
-    Internal::g_loadAddress = reinterpret_cast<unsigned long>(GetModuleHandle(NULL));
+
+    // Get module base address and size
+    HMODULE hModule = NULL;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCSTR>(&install), &hModule);
+    if (hModule) {
+        Internal::g_loadAddress = reinterpret_cast<unsigned long>(hModule);
+        MODULEINFO modInfo;
+        if (GetModuleInformation(GetCurrentProcess(), hModule, &modInfo, sizeof(modInfo))) {
+            Internal::g_moduleSize = modInfo.SizeOfImage;
+        }
+    } else {
+        Internal::g_loadAddress = reinterpret_cast<unsigned long>(GetModuleHandle(NULL));
+    }
 
     // Initialize symbol handler for better stack traces (best effort, ignore errors)
     HANDLE process = GetCurrentProcess();
@@ -472,6 +514,32 @@ inline bool install(const std::string& crashDir) {
     Dl_info info;
     if (dladdr(reinterpret_cast<void*>(&install), &info)) {
         Internal::g_loadAddress = reinterpret_cast<unsigned long>(info.dli_fbase);
+
+        // Get module size by finding the loaded image
+#ifdef __APPLE__
+        uint32_t imageCount = _dyld_image_count();
+        for (uint32_t i = 0; i < imageCount; i++) {
+            const struct mach_header* header = _dyld_get_image_header(i);
+            if (reinterpret_cast<const void*>(header) == info.dli_fbase) {
+                // Calculate size from mach-o header
+                if (header->magic == MH_MAGIC_64) {
+                    const struct mach_header_64* header64 = reinterpret_cast<const struct mach_header_64*>(header);
+                    const struct load_command* cmd = reinterpret_cast<const struct load_command*>(header64 + 1);
+                    for (uint32_t j = 0; j < header64->ncmds; j++) {
+                        if (cmd->cmd == LC_SEGMENT_64) {
+                            const struct segment_command_64* seg = reinterpret_cast<const struct segment_command_64*>(cmd);
+                            unsigned long segEnd = seg->vmaddr + seg->vmsize;
+                            if (segEnd > Internal::g_moduleSize) {
+                                Internal::g_moduleSize = segEnd;
+                            }
+                        }
+                        cmd = reinterpret_cast<const struct load_command*>(reinterpret_cast<const char*>(cmd) + cmd->cmdsize);
+                    }
+                }
+                break;
+            }
+        }
+#endif
     }
 #endif
 
@@ -522,6 +590,74 @@ inline bool install(const std::string& crashDir) {
 }
 
 /**
+ * @brief Check if stacktrace contains addresses within our module's address range
+ * @param report The crash report to check
+ * @return true if at least one address in stacktrace is from our module
+ * @details Excludes the crash handler's own frame (signalHandler/exceptionFilter)
+ */
+inline bool hasAddressesFromOurModule(const Report& report) {
+    if (report.loadAddress.empty() || report.moduleSize.empty()) {
+        // No address info - can't filter, assume it's ours
+        return true;
+    }
+
+    unsigned long loadAddr = 0;
+    unsigned long modSize = 0;
+
+    try {
+        loadAddr = std::stoul(report.loadAddress, nullptr, 16);
+        modSize = std::stoul(report.moduleSize, nullptr, 16);
+    } catch (...) {
+        // Parse error - can't filter, assume it's ours
+        return true;
+    }
+
+    if (modSize == 0) {
+        // No size info - can't filter, assume it's ours
+        return true;
+    }
+
+    unsigned long moduleEnd = loadAddr + modSize;
+
+    // Parse stacktrace for addresses
+    std::istringstream iss(report.stacktrace);
+    std::string line;
+    int framesFromOurModule = 0;
+
+    while (std::getline(iss, line)) {
+        // Find hex addresses in the line (format: "  0x..." or "0x...")
+        size_t pos = line.find("0x");
+        while (pos != std::string::npos) {
+            size_t endPos = pos + 2;
+            while (endPos < line.size() && std::isxdigit(line[endPos])) {
+                endPos++;
+            }
+
+            if (endPos > pos + 2) {
+                std::string addrStr = line.substr(pos, endPos - pos);
+                try {
+                    unsigned long addr = std::stoul(addrStr, nullptr, 16);
+                    if (addr >= loadAddr && addr < moduleEnd) {
+                        framesFromOurModule++;
+                        // Need at least 2 frames from our module
+                        // (1 is always the crash handler itself)
+                        if (framesFromOurModule >= 2) {
+                            return true;
+                        }
+                    }
+                } catch (...) {
+                    // Ignore parse errors
+                }
+            }
+
+            pos = line.find("0x", endPos);
+        }
+    }
+
+    return false;
+}
+
+/**
  * @brief Check if there's a pending crash report from previous run
  * @return Crash report if exists
  */
@@ -544,6 +680,9 @@ inline std::optional<Report> loadPendingReport() {
             inStacktrace = false;
         } else if (line.rfind("LOAD_ADDR: ", 0) == 0) {
             report.loadAddress = line.substr(11);
+            inStacktrace = false;
+        } else if (line.rfind("MODULE_SIZE: ", 0) == 0) {
+            report.moduleSize = line.substr(13);
             inStacktrace = false;
         } else if (line.rfind("EXEC_PATH: ", 0) == 0) {
             report.execPath = line.substr(11);

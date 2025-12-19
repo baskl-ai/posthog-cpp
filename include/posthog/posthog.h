@@ -39,9 +39,9 @@
 #define POSTHOG_H
 
 #define POSTHOG_VERSION_MAJOR 1
-#define POSTHOG_VERSION_MINOR 2
+#define POSTHOG_VERSION_MINOR 3
 #define POSTHOG_VERSION_PATCH 0
-#define POSTHOG_VERSION "1.2.0"
+#define POSTHOG_VERSION "1.3.0"
 
 #include <string>
 #include <map>

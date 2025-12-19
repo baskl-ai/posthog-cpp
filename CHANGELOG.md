@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.3.0] - 2025-12-19
+
+### Added
+- `hasAddressesFromOurModule()` function to filter out host app crashes
+- `MODULE_SIZE` field in crash reports for address range filtering
+- Module size tracking on macOS (mach-o header parsing) and Windows (MODULEINFO)
+
+### Changed
+- Crash filtering requires 2+ frames from our module (1 is always crash handler itself)
+
 ## [1.2.0] - 2025-12-15
 
 ### Changed
