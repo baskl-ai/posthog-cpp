@@ -601,12 +601,12 @@ inline bool hasAddressesFromOurModule(const Report& report) {
         return true;
     }
 
-    unsigned long loadAddr = 0;
-    unsigned long modSize = 0;
+    unsigned long long loadAddr = 0;
+    unsigned long long modSize = 0;
 
     try {
-        loadAddr = std::stoul(report.loadAddress, nullptr, 16);
-        modSize = std::stoul(report.moduleSize, nullptr, 16);
+        loadAddr = std::stoull(report.loadAddress, nullptr, 16);
+        modSize = std::stoull(report.moduleSize, nullptr, 16);
     } catch (...) {
         // Parse error - can't filter, assume it's ours
         return true;
@@ -617,7 +617,7 @@ inline bool hasAddressesFromOurModule(const Report& report) {
         return true;
     }
 
-    unsigned long moduleEnd = loadAddr + modSize;
+    unsigned long long moduleEnd = loadAddr + modSize;
 
     // Parse stacktrace for addresses
     std::istringstream iss(report.stacktrace);
@@ -636,7 +636,7 @@ inline bool hasAddressesFromOurModule(const Report& report) {
             if (endPos > pos + 2) {
                 std::string addrStr = line.substr(pos, endPos - pos);
                 try {
-                    unsigned long addr = std::stoul(addrStr, nullptr, 16);
+                    unsigned long long addr = std::stoull(addrStr, nullptr, 16);
                     if (addr >= loadAddr && addr < moduleEnd) {
                         framesFromOurModule++;
                         // Need at least 2 frames from our module
