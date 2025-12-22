@@ -39,9 +39,9 @@
 #define POSTHOG_H
 
 #define POSTHOG_VERSION_MAJOR 1
-#define POSTHOG_VERSION_MINOR 3
+#define POSTHOG_VERSION_MINOR 4
 #define POSTHOG_VERSION_PATCH 0
-#define POSTHOG_VERSION "1.3.0"
+#define POSTHOG_VERSION "1.4.0"
 
 #include <string>
 #include <map>
@@ -205,6 +205,26 @@ public:
                         const std::string& errorMessage,
                         const std::string& component = "",
                         const std::map<std::string, std::string>& properties = {});
+
+    /**
+     * @brief Set person properties using $set or $set_once
+     *
+     * Sets properties on the user/person in PostHog. Use $set to always update
+     * the property value, or $set_once to only set if not already set.
+     *
+     * @param properties Properties to set, mapped to either $set or $set_once
+     * @param setOnce If true, uses $set_once (only sets if property doesn't exist)
+     *
+     * @code
+     * // Always set/update property
+     * client.setPersonProperties({{"is_internal_user", "true"}}, false);
+     *
+     * // Only set once (won't overwrite if already exists)
+     * client.setPersonProperties({{"is_internal_user", "false"}}, true);
+     * @endcode
+     */
+    void setPersonProperties(const std::map<std::string, std::string>& properties,
+                            bool setOnce = false);
 
     /**
      * @brief Install crash handler for unhandled signals

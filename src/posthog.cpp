@@ -239,6 +239,45 @@ public:
         std::cout << "[PostHog] Queued exception: " << errorType << std::endl;
     }
 
+    void setPersonProperties(const std::map<std::string, std::string>& properties, bool setOnce) {
+        if (!enabled || !initialized) return;
+        if (properties.empty()) return;
+
+        json j;
+        j["api_key"] = config.apiKey;
+        j["event"] = "$set";
+        j["distinct_id"] = distinctId;
+
+        json props;
+        props["$lib"] = config.appName;
+        props["$lib_version"] = config.appVersion;
+        props["$os"] = osInfo;
+        props["posthog_cpp_version"] = POSTHOG_VERSION;
+
+        // Add properties to either $set or $set_once
+        json propsToSet;
+        for (const auto& [key, value] : properties) {
+            propsToSet[key] = value;
+        }
+
+        if (setOnce) {
+            props["$set_once"] = propsToSet;
+        } else {
+            props["$set"] = propsToSet;
+        }
+
+        j["properties"] = props;
+
+        {
+            std::lock_guard<std::mutex> lock(queueMutex);
+            eventQueue.push(j.dump());
+        }
+        queueCondition.notify_one();
+
+        std::cout << "[PostHog] Queued person properties ("
+                  << (setOnce ? "$set_once" : "$set") << ")" << std::endl;
+    }
+
     void trackCrashReport(const CrashHandler::Report& report) {
         if (!enabled || !initialized) return;
 
@@ -452,6 +491,10 @@ void Client::trackException(const std::string& errorType,
                             const std::string& component,
                             const std::map<std::string, std::string>& properties) {
     m_impl->trackException(errorType, errorMessage, component, properties);
+}
+
+void Client::setPersonProperties(const std::map<std::string, std::string>& properties, bool setOnce) {
+    m_impl->setPersonProperties(properties, setOnce);
 }
 
 void Client::installCrashHandler(const std::string& crashDir) {

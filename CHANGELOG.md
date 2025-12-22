@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.4.0] - 2025-12-22
+
+### Added
+- `setPersonProperties()` method for setting person properties with `$set` or `$set_once`
+- Support for setting user properties to enable analytics filtering by internal/external users
+
 ## [1.3.0] - 2025-12-19
 
 ### Added

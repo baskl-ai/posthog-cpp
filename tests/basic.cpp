@@ -56,6 +56,20 @@ int main() {
         {"number_as_string", "42"}
     });
 
+    // Set person properties
+    std::cout << "\nSetting person properties..." << std::endl;
+
+    // $set - always updates the property
+    client.setPersonProperties({
+        {"example_property", "test_value"},
+        {"sdk_test", "true"}
+    }, false);
+
+    // $set_once - only sets if property doesn't exist yet
+    client.setPersonProperties({
+        {"first_seen_sdk", "posthog-cpp"}
+    }, true);
+
     // Track exception
     client.trackException("ExampleError", "This is a test error", "example_component", {
         {"error_code", "123"}
