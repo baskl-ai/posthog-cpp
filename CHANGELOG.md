@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.4.1] - 2025-12-27
+
+### Fixed
+- Actually use `hasAddressesFromOurModule()` filter in `installCrashHandler()` to prevent reporting crashes from other plugins/host app
+- Add `MODULE_SIZE` to `std::set_terminate` handler (was missing, causing filter to fail for terminate crashes)
+
 ## [1.4.0] - 2025-12-22
 
 ### Added

@@ -512,8 +512,14 @@ void Client::installCrashHandler(const std::string& crashDir) {
     // Check for pending crash report
     auto report = CrashHandler::loadPendingReport();
     if (report.has_value()) {
-        std::cout << "[PostHog] Found crash report: " << report->signalName << std::endl;
-        m_impl->trackCrashReport(*report);
+        // Filter out crashes that don't involve our module
+        // This prevents reporting crashes from other plugins or host app
+        if (CrashHandler::hasAddressesFromOurModule(*report)) {
+            std::cout << "[PostHog] Found crash report from our module: " << report->signalName << std::endl;
+            m_impl->trackCrashReport(*report);
+        } else {
+            std::cout << "[PostHog] Ignoring crash report (not from our module): " << report->signalName << std::endl;
+        }
         CrashHandler::clearPendingReport();
         CrashHandler::clearMetadata();
     }

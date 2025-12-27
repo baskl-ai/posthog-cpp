@@ -577,6 +577,7 @@ inline bool install(const std::string& crashDir) {
             f << "SIGNAL: TERMINATE\n";
             f << "TIME: " << time(nullptr) << "\n";
             f << "LOAD_ADDR: 0x" << std::hex << Internal::g_loadAddress << "\n";
+            f << "MODULE_SIZE: 0x" << std::hex << Internal::g_moduleSize << "\n";
             f << "EXEC_PATH: " << Internal::g_execPath << "\n";
             f << "MESSAGE: " << msg << "\n";
             f.close();
