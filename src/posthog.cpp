@@ -319,6 +319,16 @@ public:
             props[key] = value;
         }
 
+        // Load and add log file contents from previous session
+        auto logConfig = CrashHandler::loadLogFileConfig();
+        if (!logConfig.path.empty()) {
+            std::string logs = CrashHandler::readLastLines(logConfig.path, logConfig.maxLines);
+            if (!logs.empty()) {
+                props["recent_logs"] = logs;
+                std::cout << "[PostHog] Attached " << logConfig.maxLines << " lines from log file" << std::endl;
+            }
+        }
+
         // Build $exception_list
         json exceptionList = json::array();
         json exception;
@@ -522,6 +532,7 @@ void Client::installCrashHandler(const std::string& crashDir) {
         }
         CrashHandler::clearPendingReport();
         CrashHandler::clearMetadata();
+        CrashHandler::clearLogFileConfig();
     }
 }
 
@@ -537,6 +548,24 @@ void Client::setCrashMetadata(const std::map<std::string, std::string>& metadata
         std::cout << "[PostHog] Crash metadata saved (" << metadata.size() << " properties)" << std::endl;
     } else {
         std::cerr << "[PostHog] Failed to save crash metadata" << std::endl;
+    }
+}
+
+void Client::setLogFile(const std::string& logFilePath, int maxLines) {
+    // Check if crash handler is installed by verifying crash file path exists
+    std::string crashPath = CrashHandler::getCrashFilePath();
+    if (crashPath.empty()) {
+        std::cerr << "[PostHog] Warning: setLogFile called before installCrashHandler" << std::endl;
+        return;
+    }
+
+    CrashHandler::LogFileConfig config;
+    config.path = logFilePath;
+    config.maxLines = maxLines;
+    if (CrashHandler::saveLogFileConfig(config)) {
+        std::cout << "[PostHog] Log file configured: " << logFilePath << " (max " << maxLines << " lines)" << std::endl;
+    } else {
+        std::cerr << "[PostHog] Failed to save log file config" << std::endl;
     }
 }
 

@@ -30,6 +30,7 @@
 #include <ctime>
 #include <cstring>
 #include <cstdlib>
+#include <deque>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -73,6 +74,15 @@ struct Report {
  */
 struct Metadata {
     std::map<std::string, std::string> properties;  ///< Custom properties to include
+};
+
+/**
+ * @brief Log file configuration for crash reports
+ * @details Stores the path to a log file and max lines to include in crash reports
+ */
+struct LogFileConfig {
+    std::string path;     ///< Full path to the log file
+    int maxLines = 50;    ///< Maximum lines to read from end of file
 };
 
 namespace Internal {
@@ -823,6 +833,111 @@ inline void clearMetadata() {
 #else
     unlink(metadataPath.c_str());
 #endif
+}
+
+/**
+ * @brief Get log file config path (based on crash file path)
+ */
+inline std::string getLogFileConfigPath() {
+    std::string crashPath = Internal::g_crashFilePath;
+    if (crashPath.empty()) return "";
+
+    // Replace pending_crash.txt with crash_logfile.txt
+    size_t pos = crashPath.rfind("pending_crash.txt");
+    if (pos != std::string::npos) {
+        return crashPath.substr(0, pos) + "crash_logfile.txt";
+    }
+    return crashPath + ".logfile";
+}
+
+/**
+ * @brief Save log file configuration for use in crash reports
+ * @param config Log file configuration (path and max lines)
+ * @return true if saved successfully
+ */
+inline bool saveLogFileConfig(const LogFileConfig& config) {
+    std::string configPath = getLogFileConfigPath();
+    if (configPath.empty()) return false;
+
+    std::ofstream f(configPath);
+    if (!f.is_open()) return false;
+
+    f << "path=" << config.path << "\n";
+    f << "maxLines=" << config.maxLines << "\n";
+
+    return true;
+}
+
+/**
+ * @brief Load log file configuration
+ * @return LogFileConfig if file exists, empty config otherwise
+ */
+inline LogFileConfig loadLogFileConfig() {
+    LogFileConfig config;
+    std::string configPath = getLogFileConfigPath();
+    if (configPath.empty()) return config;
+
+    std::ifstream f(configPath);
+    if (!f.is_open()) return config;
+
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.rfind("path=", 0) == 0) {
+            config.path = line.substr(5);
+        } else if (line.rfind("maxLines=", 0) == 0) {
+            try {
+                config.maxLines = std::stoi(line.substr(9));
+            } catch (...) {
+                config.maxLines = 50;
+            }
+        }
+    }
+
+    return config;
+}
+
+/**
+ * @brief Clear log file config after crash report is sent
+ */
+inline void clearLogFileConfig() {
+    std::string configPath = getLogFileConfigPath();
+    if (configPath.empty()) return;
+
+#ifdef _WIN32
+    DeleteFileA(configPath.c_str());
+#else
+    unlink(configPath.c_str());
+#endif
+}
+
+/**
+ * @brief Read last N lines from a file
+ * @param filePath Path to the file to read
+ * @param maxLines Maximum number of lines to read from end
+ * @return String containing the last N lines (newline separated)
+ */
+inline std::string readLastLines(const std::string& filePath, int maxLines) {
+    std::ifstream file(filePath);
+    if (!file.is_open()) return "";
+
+    // Read all lines into a deque (efficient for removing from front)
+    std::deque<std::string> lines;
+    std::string line;
+    while (std::getline(file, line)) {
+        lines.push_back(line);
+        if (static_cast<int>(lines.size()) > maxLines) {
+            lines.pop_front();
+        }
+    }
+
+    // Join lines
+    std::string result;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (i > 0) result += "\n";
+        result += lines[i];
+    }
+
+    return result;
 }
 
 } // namespace CrashHandler

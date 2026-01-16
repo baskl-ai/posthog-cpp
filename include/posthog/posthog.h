@@ -39,9 +39,9 @@
 #define POSTHOG_H
 
 #define POSTHOG_VERSION_MAJOR 1
-#define POSTHOG_VERSION_MINOR 4
-#define POSTHOG_VERSION_PATCH 1
-#define POSTHOG_VERSION "1.4.1"
+#define POSTHOG_VERSION_MINOR 5
+#define POSTHOG_VERSION_PATCH 0
+#define POSTHOG_VERSION "1.5.0"
 
 #include <string>
 #include <map>
@@ -260,6 +260,22 @@ public:
      * @endcode
      */
     void setCrashMetadata(const std::map<std::string, std::string>& metadata);
+
+    /**
+     * @brief Set log file path to include with crash reports
+     *
+     * When a crash report is sent from a previous session, the last N lines
+     * from the specified log file will be included in the crash event properties.
+     * Call after installCrashHandler().
+     *
+     * @param logFilePath Full path to the log file
+     * @param maxLines Maximum number of lines to include (default: 50)
+     *
+     * @code
+     * client.setLogFile("/path/to/plugin.log", 50);
+     * @endcode
+     */
+    void setLogFile(const std::string& logFilePath, int maxLines = 50);
 
     /**
      * @brief Flush pending events synchronously

@@ -15,6 +15,7 @@
 #include <posthog/posthog.h>
 #include <posthog/crash_handler.h>
 #include <iostream>
+#include <fstream>
 #include <string>
 #include <cstdlib>
 #include <cstring>
@@ -51,10 +52,13 @@ int main(int argc, char* argv[]) {
 #ifdef _WIN32
     const char* tempEnv = std::getenv("TEMP");
     std::string crashDir = std::string(tempEnv ? tempEnv : "C:/Windows/Temp") + "/posthog_crash_test";
+    std::string testLogFile = std::string(tempEnv ? tempEnv : "C:/Windows/Temp") + "/posthog_test.log";
 #else
     std::string crashDir = "/tmp/posthog_crash_test";
+    std::string testLogFile = "/tmp/posthog_test.log";
 #endif
     std::cout << "Crash dir: " << crashDir << std::endl;
+    std::cout << "Test log file: " << testLogFile << std::endl;
 
     bool checkMode = (argc > 1 && strcmp(argv[1], "check") == 0);
 
@@ -82,6 +86,23 @@ int main(int argc, char* argv[]) {
         std::cout << "  Exec path: " << report->execPath << std::endl;
         std::cout << "  Stacktrace:\n" << report->stacktrace << std::endl;
 
+        // Test log file loading
+        auto logConfig = PostHog::CrashHandler::loadLogFileConfig();
+        if (!logConfig.path.empty()) {
+            std::cout << "\nLog file config found:" << std::endl;
+            std::cout << "  Path: " << logConfig.path << std::endl;
+            std::cout << "  Max lines: " << logConfig.maxLines << std::endl;
+
+            std::string logs = PostHog::CrashHandler::readLastLines(logConfig.path, logConfig.maxLines);
+            if (!logs.empty()) {
+                std::cout << "  Log content (" << logs.size() << " chars):\n" << logs << std::endl;
+            } else {
+                std::cout << "  (no log content found)" << std::endl;
+            }
+        } else {
+            std::cout << "\nNo log file config found" << std::endl;
+        }
+
         // Test hasAddressesFromOurModule
         bool isOurCrash = PostHog::CrashHandler::hasAddressesFromOurModule(*report);
         std::cout << "\n  hasAddressesFromOurModule: " << (isOurCrash ? "YES" : "NO") << std::endl;
@@ -97,7 +118,7 @@ int main(int argc, char* argv[]) {
             config.apiKey = apiKey;
             config.appName = "posthog-cpp-crash-test";
             config.appVersion = "1.0.0";
-            config.host = "https://eu.i.posthog.com";
+            config.host = "https://us.i.posthog.com";
 
             PostHog::Client client(config);
             client.initialize();
@@ -121,19 +142,37 @@ int main(int argc, char* argv[]) {
         std::cout << "\n[Crash Mode] Will crash in 2 seconds..." << std::endl;
         std::cout << "After crash, run: ./crash check" << std::endl;
 
+        // Create test log file with some content
+        {
+            std::ofstream logFile(testLogFile);
+            for (int i = 1; i <= 100; i++) {
+                logFile << "[2025-01-16 12:00:" << (i < 10 ? "0" : "") << i << "] Log line " << i << " - Some debug info here\n";
+            }
+            std::cout << "Created test log file with 100 lines" << std::endl;
+        }
+
         if (!apiKey.empty()) {
             PostHog::Config config;
             config.apiKey = apiKey;
             config.appName = "posthog-cpp-crash-test";
             config.appVersion = "1.0.0";
+            config.host = "https://us.i.posthog.com";
 
             PostHog::Client client(config);
             client.initialize();
             client.track("crash_test_started", {{"mode", "crash"}});
             client.flush(2000);
             client.installCrashHandler(crashDir);
+            client.setLogFile(testLogFile, 30);  // Test with 30 lines
+            std::cout << "Log file configured: " << testLogFile << " (30 lines)" << std::endl;
         } else {
             PostHog::CrashHandler::install(crashDir);
+            // Also set log file manually for non-API test
+            PostHog::CrashHandler::LogFileConfig logConfig;
+            logConfig.path = testLogFile;
+            logConfig.maxLines = 30;
+            PostHog::CrashHandler::saveLogFileConfig(logConfig);
+            std::cout << "Log file configured (manual): " << testLogFile << " (30 lines)" << std::endl;
         }
 
         std::cout << "Crash handler: " << PostHog::CrashHandler::getCrashFilePath() << std::endl;

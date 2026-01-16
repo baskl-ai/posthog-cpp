@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0] - 2025-01-16
+
+### Added
+- `setLogFile(path, maxLines)` method to include recent log lines in crash reports
+- When a crash report is sent from a previous session, the last N lines from the configured log file are automatically attached as `recent_logs` property
+- `LogFileConfig` struct and related functions in crash_handler.h for log file path persistence
+
 ## [1.4.1] - 2025-12-27
 
 ### Fixed
