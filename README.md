@@ -174,4 +174,7 @@ See [include/posthog/posthog.h](include/posthog/posthog.h) for full API (Doxygen
 
 ## License
 
-[BASKL License](LICENSE)
+See [LICENSE](LICENSE)
+
+## Support our work
+If you appreciate this free software and would like to leave a donation, [you can do so here](https://donate.stripe.com/14AcN65uL9J2g6h8UObsc01) (adjust the quantity to change the $ amount)!
