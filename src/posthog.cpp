@@ -278,6 +278,76 @@ public:
                   << (setOnce ? "$set_once" : "$set") << ")" << std::endl;
     }
 
+    /**
+     * @brief Generate detailed crash description from crash report
+     * @param report Crash report with signal name, code, and fault address
+     * @return Human-readable crash description
+     */
+    std::string generateCrashDescription(const CrashHandler::Report& report) {
+        std::string description;
+
+        // Windows exception codes
+        if (!report.exceptionCode.empty() && report.signalName == "EXCEPTION") {
+            std::string code = report.exceptionCode;
+            if (code == "0xC0000005" || code == "0xc0000005") {
+                description = "Access Violation";
+                if (!report.faultAddress.empty()) {
+                    description += " at address " + report.faultAddress;
+                }
+            } else if (code == "0xC0000094" || code == "0xc0000094") {
+                description = "Integer Division by Zero";
+            } else if (code == "0xC000008C" || code == "0xc000008c") {
+                description = "Array Bounds Exceeded";
+            } else if (code == "0x80000003" || code == "0x80000003") {
+                description = "Breakpoint Exception";
+            } else if (code == "0xC00000FD" || code == "0xc00000fd") {
+                description = "Stack Overflow";
+            } else {
+                description = "Exception " + code;
+                if (!report.faultAddress.empty()) {
+                    description += " at " + report.faultAddress;
+                }
+            }
+        }
+        // Unix signal codes
+        else if (report.signalName == "SIGSEGV") {
+            description = "Segmentation Fault";
+            if (!report.faultAddress.empty()) {
+                description += " at address " + report.faultAddress;
+            }
+            // Signal codes for SIGSEGV
+            if (!report.exceptionCode.empty()) {
+                int code = std::atoi(report.exceptionCode.c_str());
+                if (code == 1) {
+                    description += " (address not mapped to object)";
+                } else if (code == 2) {
+                    description += " (invalid permissions for mapped object)";
+                }
+            }
+        } else if (report.signalName == "SIGABRT") {
+            description = "Aborted";
+        } else if (report.signalName == "SIGBUS") {
+            description = "Bus Error";
+            if (!report.faultAddress.empty()) {
+                description += " at address " + report.faultAddress;
+            }
+        } else if (report.signalName == "SIGFPE") {
+            description = "Floating Point Exception";
+        } else if (report.signalName == "SIGILL") {
+            description = "Illegal Instruction";
+            if (!report.faultAddress.empty()) {
+                description += " at address " + report.faultAddress;
+            }
+        } else {
+            description = report.signalName;
+            if (!report.faultAddress.empty()) {
+                description += " at " + report.faultAddress;
+            }
+        }
+
+        return description.empty() ? "Application crashed (from previous session)" : description;
+    }
+
     void trackCrashReport(const CrashHandler::Report& report) {
         if (!enabled || !initialized) return;
 
@@ -333,7 +403,7 @@ public:
         json exceptionList = json::array();
         json exception;
         exception["type"] = report.signalName;
-        exception["value"] = "Application crashed (from previous session)";
+        exception["value"] = generateCrashDescription(report);
         exception["mechanism"]["handled"] = false;
         exception["mechanism"]["synthetic"] = false;
 

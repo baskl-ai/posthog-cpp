@@ -39,9 +39,9 @@
 #define POSTHOG_H
 
 #define POSTHOG_VERSION_MAJOR 1
-#define POSTHOG_VERSION_MINOR 5
+#define POSTHOG_VERSION_MINOR 6
 #define POSTHOG_VERSION_PATCH 0
-#define POSTHOG_VERSION "1.5.0"
+#define POSTHOG_VERSION "1.6.0"
 
 #include <string>
 #include <map>
@@ -97,6 +97,8 @@ struct StackFrame {
  */
 struct CrashReport {
     std::string signalName;   ///< Signal name (SIGSEGV, SIGABRT, etc.) or EXCEPTION on Windows
+    std::string exceptionCode;   ///< Windows: Exception code (0xC0000005), Unix: signal code
+    std::string faultAddress;    ///< Address that caused the crash (if available)
     std::string stacktrace;   ///< Raw stack addresses (one per line, hex format)
     std::string timestamp;    ///< Unix timestamp when crash occurred
     std::string platform;     ///< Platform name (macOS, Windows, Linux)

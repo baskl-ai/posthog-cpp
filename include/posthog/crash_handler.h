@@ -59,7 +59,9 @@ namespace CrashHandler {
  * @brief Crash report data structure
  */
 struct Report {
-    std::string signalName;      ///< Signal/exception type
+    std::string signalName;      ///< Signal/exception type (SIGSEGV, EXCEPTION, etc)
+    std::string exceptionCode;   ///< Windows: Exception code (0xC0000005), Unix: signal code
+    std::string faultAddress;    ///< Address that caused the crash (if available)
     std::string timestamp;       ///< When crash occurred (unix timestamp)
     std::string stacktrace;      ///< Raw stacktrace
     std::string platform;        ///< OS info
@@ -167,7 +169,8 @@ namespace Internal {
     }
 
 #ifndef _WIN32
-    inline void signalHandler(int sig) {
+    inline void signalHandlerWithInfo(int sig, siginfo_t* info, void* ucontext) {
+        (void)ucontext;  // Unused for now
         char* ptr = g_crashBuffer;
         size_t remaining = sizeof(g_crashBuffer);
 
@@ -179,6 +182,30 @@ namespace Internal {
         safeCopy(ptr, sigName, remaining);
         ptr += strlen(ptr);
         remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+        // Save signal code (e.g., SEGV_MAPERR, SEGV_ACCERR)
+        safeCopy(ptr, "\nCODE: ", remaining);
+        ptr += strlen(ptr);
+        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+        char codeStr[16];
+        safeItoa(info ? info->si_code : 0, codeStr, sizeof(codeStr));
+        safeCopy(ptr, codeStr, remaining);
+        ptr += strlen(ptr);
+        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+        // Save fault address if available
+        if (info && info->si_addr) {
+            safeCopy(ptr, "\nFAULT_ADDR: ", remaining);
+            ptr += strlen(ptr);
+            remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+            char addrStr[32];
+            safeUlongToHex(reinterpret_cast<unsigned long>(info->si_addr), addrStr, sizeof(addrStr));
+            safeCopy(ptr, addrStr, remaining);
+            ptr += strlen(ptr);
+            remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+        }
 
         safeCopy(ptr, "\nTIME: ", remaining);
         ptr += strlen(ptr);
@@ -278,6 +305,17 @@ namespace Internal {
         char codeStr[16];
         sprintf(codeStr, "%08lX", code);
         safeCopy(ptr, codeStr, remaining);
+        ptr += strlen(ptr);
+        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+        safeCopy(ptr, "\nFAULT_ADDR: 0x", remaining);
+        ptr += strlen(ptr);
+        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+        PVOID faultAddr = exceptionInfo->ExceptionRecord->ExceptionAddress;
+        char faultAddrStr[32];
+        sprintf(faultAddrStr, "%p", faultAddr);
+        safeCopy(ptr, faultAddrStr, remaining);
         ptr += strlen(ptr);
         remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
 
@@ -559,9 +597,9 @@ inline bool install(const std::string& crashDir) {
     SetUnhandledExceptionFilter(Internal::exceptionFilter);
 #else
     struct sigaction sa;
-    sa.sa_handler = Internal::signalHandler;
+    sa.sa_sigaction = Internal::signalHandlerWithInfo;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESETHAND;
+    sa.sa_flags = SA_RESETHAND | SA_SIGINFO;  // SA_SIGINFO to get siginfo_t
 
     sigaction(SIGSEGV, &sa, nullptr);
     sigaction(SIGABRT, &sa, nullptr);
@@ -685,6 +723,12 @@ inline std::optional<Report> loadPendingReport() {
     while (std::getline(f, line)) {
         if (line.rfind("SIGNAL: ", 0) == 0) {
             report.signalName = line.substr(8);
+            inStacktrace = false;
+        } else if (line.rfind("CODE: ", 0) == 0) {
+            report.exceptionCode = line.substr(6);
+            inStacktrace = false;
+        } else if (line.rfind("FAULT_ADDR: ", 0) == 0) {
+            report.faultAddress = line.substr(12);
             inStacktrace = false;
         } else if (line.rfind("TIME: ", 0) == 0) {
             report.timestamp = line.substr(6);

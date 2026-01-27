@@ -1,0 +1,135 @@
+#!/bin/sh
+''''which python3 >/dev/null 2>&1 && exec python3 "$0" "$@" || exec python "$0" "$@" # '''
+"""
+Pre-commit hook: Auto-update version when CHANGELOG.md changes
+
+Extracts version from CHANGELOG.md and updates project files automatically.
+"""
+
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+def get_staged_files():
+    """Get list of staged files"""
+    result = subprocess.run(
+        ['git', 'diff', '--cached', '--name-only'],
+        capture_output=True,
+        text=True,
+        check=False
+    )
+    return result.stdout.strip().split('\n') if result.stdout.strip() else []
+
+
+def extract_version():
+    """Extract version from CHANGELOG.md"""
+    changelog = Path('CHANGELOG.md')
+    if not changelog.exists():
+        return None
+
+    content = changelog.read_text(encoding='utf-8')
+    match = re.search(r'^## \[([\d.]+)\]', content, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def update_cmake(version):
+    """Update CMakeLists.txt"""
+    cmake_file = Path('CMakeLists.txt')
+    if not cmake_file.exists():
+        return False
+
+    content = cmake_file.read_text()
+    new_content = re.sub(
+        r'(project\(posthog-cpp\s+VERSION\s+)[\d.]+',
+        rf'\g<1>{version}',
+        content
+    )
+
+    if content != new_content:
+        cmake_file.write_text(new_content)
+        return True
+    return False
+
+
+def update_header(version):
+    """Update version defines in posthog.h"""
+    header_file = Path('include/posthog/posthog.h')
+    if not header_file.exists():
+        return False
+
+    content = header_file.read_text()
+    major, minor, patch = version.split('.')
+    old_content = content
+
+    # Update or add version defines
+    version_defines = f'''#define POSTHOG_VERSION_MAJOR {major}
+#define POSTHOG_VERSION_MINOR {minor}
+#define POSTHOG_VERSION_PATCH {patch}
+#define POSTHOG_VERSION "{version}"'''
+
+    # Check if version defines already exist
+    if '#define POSTHOG_VERSION_MAJOR' in content:
+        # Update existing defines
+        content = re.sub(
+            r'#define POSTHOG_VERSION_MAJOR \d+\n#define POSTHOG_VERSION_MINOR \d+\n#define POSTHOG_VERSION_PATCH \d+\n#define POSTHOG_VERSION "[^"]+"',
+            version_defines,
+            content
+        )
+    else:
+        # Add after #define POSTHOG_H
+        content = content.replace(
+            '#define POSTHOG_H\n',
+            f'#define POSTHOG_H\n\n{version_defines}\n'
+        )
+
+    if content != old_content:
+        header_file.write_text(content)
+        return True
+    return False
+
+
+def stage_files(files):
+    """Stage files for commit"""
+    subprocess.run(['git', 'add'] + files, check=False)
+
+
+def main():
+    # Check if CHANGELOG.md is staged
+    staged = get_staged_files()
+    if 'CHANGELOG.md' not in staged:
+        return 0
+
+    print('[PRE-COMMIT] CHANGELOG.md changed, updating version...')
+
+    version = extract_version()
+    if not version:
+        print('[PRE-COMMIT] [WARN] Could not extract version from CHANGELOG.md')
+        return 0
+
+    # Validate version format
+    if not re.match(r'^\d+\.\d+\.\d+$', version):
+        print(f'[PRE-COMMIT] [WARN] Invalid version format: {version}')
+        return 0
+
+    print(f'[PRE-COMMIT] Found version: {version}')
+
+    # Update files
+    updated = []
+    if update_cmake(version):
+        updated.append('CMakeLists.txt')
+    if update_header(version):
+        updated.append('include/posthog/posthog.h')
+
+    if updated:
+        stage_files(updated)
+        print(f'[PRE-COMMIT] [OK] Updated and staged: {", ".join(updated)}')
+    else:
+        print('[PRE-COMMIT] No files updated')
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

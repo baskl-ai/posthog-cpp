@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.6.0] - 2026-01-28
+
+### Added
+- Detailed crash descriptions with exception codes and fault addresses
+- Windows: Capture exception codes (0xC0000005 = Access Violation, etc) and fault addresses
+- Unix/macOS: Capture signal codes (SEGV_MAPERR, SEGV_ACCERR) and fault addresses via siginfo_t with SA_SIGINFO
+- `generateCrashDescription()` function to convert crash data into human-readable messages
+- Pre-commit hook: auto-update version from CHANGELOG.md (cross-platform)
+
+### Changed
+- Crash reports now show specific error descriptions instead of generic "Application crashed (from previous session)"
+- Examples: "Access Violation at address 0x00000000", "Segmentation Fault at address 0x12345678 (address not mapped to object)"
+- Crashes are now properly grouped by actual cause in PostHog error tracking
+
 ## [1.5.0] - 2025-01-16
 
 ### Added

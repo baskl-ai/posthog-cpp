@@ -1,2 +1,3 @@
-- before commiting, you MUST check tests, then MUST update @CHANGELOG.md, then MUST run @scripts/update_version.py, only after that you can commit!
+- before commiting, you MUST check tests, then MUST update @CHANGELOG.md - version will be updated automatically by pre-commit hook
+- Version is extracted from CHANGELOG.md first `## [X.Y.Z]` line
 - Looking back in your mind, think about what you'd do to take care of your future self
