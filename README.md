@@ -178,3 +178,5 @@ See [LICENSE](LICENSE)
 
 ## Support our work
 If you appreciate this free software and would like to leave a donation, [you can do so here](https://donate.stripe.com/14AcN65uL9J2g6h8UObsc01) (adjust the quantity to change the $ amount)!
+
+Note: PostHog is a trademark of PostHog Inc. This library is not affiliated with, endorsed by, or sponsored by PostHog Inc.
