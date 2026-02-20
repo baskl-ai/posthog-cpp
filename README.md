@@ -137,6 +137,51 @@ python scripts/symbolize.py \
 | **Line numbers**     | ❌ No               | ❌ No (needs symbolization) |
 | **Sent immediately** | ✅ Yes              | ❌ Next launch              |
 
+## Privacy and Opt-Out
+
+### What data is collected
+
+By default, posthog-cpp sends:
+- **Events** you explicitly track via `track()` and `trackException()`
+- **OS info** — platform, architecture, OS version (e.g., "Mac OS X arm64 15.5")
+- **Machine ID** — SHA256 hash of MAC address, used as `distinct_id`
+- **Crash reports** — signal name, stack trace addresses, exception codes
+- **SDK version** — `posthog_cpp_version` property
+
+The library does **not** access files, projects, screen content, or keystrokes.
+
+### User opt-out
+
+Users can disable all analytics by creating an empty file:
+
+| Platform | Path |
+|----------|------|
+| **macOS / Linux** | `~/.posthog_optout` |
+| **Windows** | `%USERPROFILE%\.posthog_optout` |
+
+When this file exists, `initialize()` sets `enabled = false` and no events are sent.
+
+You can also disable analytics programmatically:
+
+```cpp
+config.enabled = false;          // at init time
+client.setEnabled(false);        // at runtime
+```
+
+### GDPR / legal considerations
+
+If you distribute software that uses posthog-cpp, you are the **data controller** under GDPR. This means:
+
+- **Disclose** what you collect — add a privacy section to your product page or documentation
+- **Provide opt-out** — the `~/.posthog_optout` mechanism is available, mention it in your docs
+- **Minimize data** — only track what you need; avoid sending personal information (usernames, emails) as event properties
+- **MAC-based machine ID** is a pseudonymized hardware identifier (GDPR Article 4(5)) — it's still considered personal data. Consider using `config.distinctId` with a random persistent UUID if you want to avoid hardware fingerprinting
+- **Crash reports** typically fall under "legitimate interest" (GDPR Article 6(1)(f)), but disclosure is still recommended
+
+Example privacy notice for your product:
+
+> *This software collects anonymous usage analytics (launches, crashes, OS version) to improve stability. No personal files or project data is accessed. Data is processed via PostHog (EU servers, GDPR compliant). To disable, create an empty file at `~/.posthog_optout`.*
+
 ## Known Issues
 
 ### Windows: VS2022 17.10+ mutex crash
