@@ -9,6 +9,8 @@
 #include <posthog/crash_handler.h>
 #include <iostream>
 #include <cassert>
+#include <fstream>
+#include <cstdio>
 
 #define TEST(name) void test_##name()
 #define RUN_TEST(name) do { \
@@ -114,6 +116,71 @@ TEST(generate_machine_id) {
     CHECK(id.length() == 36);  // UUID format
 }
 
+TEST(optout_file_disables) {
+    std::string homeDir;
+#ifdef _WIN32
+    const char* h = std::getenv("USERPROFILE");
+    if (h) homeDir = h;
+    std::string optOutPath = homeDir + "\\.posthog_optout";
+#else
+    const char* h = std::getenv("HOME");
+    if (h) homeDir = h;
+    std::string optOutPath = homeDir + "/.posthog_optout";
+#endif
+
+    // Create opt-out marker file
+    { std::ofstream f(optOutPath); }
+
+    PostHog::Config config;
+    config.apiKey = "";
+    config.appName = "test_optout";
+    PostHog::Client client(config);
+    client.initialize();
+
+    CHECK(!client.isEnabled());
+    client.shutdown();
+
+    std::remove(optOutPath.c_str());
+}
+
+TEST(no_optout_file_enables) {
+    std::string homeDir;
+#ifdef _WIN32
+    const char* h = std::getenv("USERPROFILE");
+    if (h) homeDir = h;
+    std::string optOutPath = homeDir + "\\.posthog_optout";
+#else
+    const char* h = std::getenv("HOME");
+    if (h) homeDir = h;
+    std::string optOutPath = homeDir + "/.posthog_optout";
+#endif
+
+    // Ensure no opt-out file
+    std::remove(optOutPath.c_str());
+
+    PostHog::Config config;
+    config.apiKey = "";
+    config.appName = "test_no_optout";
+    PostHog::Client client(config);
+    client.initialize();
+
+    CHECK(client.isEnabled());
+    client.shutdown();
+}
+
+TEST(config_enabled_false_disables) {
+    PostHog::Config config;
+    config.apiKey = "";
+    config.appName = "test_config_disabled";
+    config.enabled = false;
+
+    PostHog::Client client(config);
+    client.initialize();
+
+    CHECK(!client.isEnabled());
+    client.shutdown();
+}
+
 TEST(crash_filter_with_module_addresses) {
     // Crash with 2+ addresses from our module - should be reported
     PostHog::CrashHandler::Report report;
@@ -188,6 +255,9 @@ int main() {
     RUN_TEST(crash_filter_no_module_addresses);
     RUN_TEST(crash_filter_no_load_address);
     RUN_TEST(crash_filter_no_module_size);
+    RUN_TEST(optout_file_disables);
+    RUN_TEST(no_optout_file_enables);
+    RUN_TEST(config_enabled_false_disables);
 
     std::cout << "\n=== All tests passed! ===" << std::endl;
     return 0;

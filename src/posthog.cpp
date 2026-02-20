@@ -61,8 +61,43 @@ public:
         shutdown();
     }
 
+    /**
+     * @brief Check if analytics opt-out marker file exists in user's home directory
+     * @return true if ~/.posthog_optout exists (user has opted out)
+     */
+    bool checkOptOutFile() const {
+        std::string homeDir;
+#ifdef _WIN32
+        const char* userProfile = std::getenv("USERPROFILE");
+        if (userProfile) homeDir = userProfile;
+#else
+        const char* home = std::getenv("HOME");
+        if (home) homeDir = home;
+#endif
+        if (homeDir.empty()) return false;
+
+#ifdef _WIN32
+        std::string optOutPath = homeDir + "\\.posthog_optout";
+#else
+        std::string optOutPath = homeDir + "/.posthog_optout";
+#endif
+        std::ifstream f(optOutPath);
+        return f.good();
+    }
+
     bool initialize() {
         if (initialized) return true;
+
+        // Check for user opt-out file (~/.posthog_optout)
+        if (checkOptOutFile()) {
+            enabled = false;
+            std::cout << "[PostHog] Analytics disabled via ~/.posthog_optout" << std::endl;
+        }
+
+        // Respect config.enabled
+        if (!config.enabled) {
+            enabled = false;
+        }
 
         // Use custom distinct ID if provided, otherwise generate from MAC address
         if (!config.distinctId.empty()) {

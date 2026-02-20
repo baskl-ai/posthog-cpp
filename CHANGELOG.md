@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.7.0] - 2026-02-20
+
+### Added
+- Opt-out via `~/.posthog_optout` file: if the file exists, all analytics are disabled
+- Cross-platform support (macOS/Linux: `$HOME/.posthog_optout`, Windows: `%USERPROFILE%\.posthog_optout`)
+
+### Fixed
+- `config.enabled = false` was ignored during `initialize()` — now properly disables analytics
+
 ## [1.6.0] - 2026-01-28
 
 ### Added
