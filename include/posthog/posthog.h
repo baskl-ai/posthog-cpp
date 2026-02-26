@@ -49,6 +49,8 @@
 #include <functional>
 #include <memory>
 
+#include "posthog/logging.h"
+
 namespace PostHog {
 
 /**
@@ -71,7 +73,16 @@ struct Config {
     std::string crashReportsDir;         ///< Custom crash directory (uses platform default if empty)
     int flushIntervalMs = 30000;         ///< Background flush interval in milliseconds
     int flushBatchSize = 10;             ///< Max events per batch (not currently used)
+    int logBatchSize = 10;               ///< Max log records per OTLP request
+    size_t maxQueueSize = 1000;          ///< Max queued items before dropping low-severity logs
     bool enabled = true;                 ///< If false, all tracking calls become no-ops
+
+    /**
+     * @brief Build config from environment variables
+     *
+     * Reads POSTHOG_API_KEY, POSTHOG_HOST, POSTHOG_APP_NAME, POSTHOG_APP_VERSION.
+     */
+    static Config fromEnv();
 };
 
 /**
@@ -209,6 +220,41 @@ public:
                         const std::map<std::string, std::string>& properties = {});
 
     /**
+     * @brief Send a structured log record via OTLP/HTTP
+     *
+     * Logs are serialized to OTLP JSON and sent to {host}/i/v1/logs
+     * using Authorization: Bearer {apiKey}.
+     *
+     * @param record Structured log record
+     */
+    void log(const LogRecord& record);
+
+    /**
+     * @brief Convenience helper for info-level logs
+     *
+     * @param message Log message
+     * @param attributes Optional structured attributes
+     */
+    void logInfo(const std::string& message,
+                 const std::vector<KeyValue>& attributes = {});
+
+    void logDebug(const std::string& message,
+                  const std::vector<KeyValue>& attributes = {});
+    void logTrace(const std::string& message,
+                  const std::vector<KeyValue>& attributes = {});
+    void logWarn(const std::string& message,
+                 const std::vector<KeyValue>& attributes = {});
+    void logError(const std::string& message,
+                  const std::vector<KeyValue>& attributes = {});
+    void logFatal(const std::string& message,
+                  const std::vector<KeyValue>& attributes = {});
+
+    /**
+     * @brief Build log request (for testing)
+     */
+    LogRequest buildLogRequest(const LogRecord& record) const;
+
+    /**
      * @brief Set person properties using $set or $set_once
      *
      * Sets properties on the user/person in PostHog. Use $set to always update
@@ -340,6 +386,40 @@ public:
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
+};
+
+/**
+ * @brief RAII wrapper for automatic initialize/shutdown
+ */
+class AutoClient {
+public:
+    explicit AutoClient(const Config& config) : m_client(config) {
+        m_client.initialize();
+    }
+
+    ~AutoClient() {
+        m_client.shutdown();
+    }
+
+    Client& get() { return m_client; }
+    const Client& get() const { return m_client; }
+    Client* operator->() { return &m_client; }
+    const Client* operator->() const { return &m_client; }
+
+private:
+    Client m_client;
+};
+
+/**
+ * @brief LogSink implementation backed by PostHog client
+ */
+class ClientLogSink : public LogSink {
+public:
+    explicit ClientLogSink(Client& client) : m_client(client) {}
+    void emit(const LogRecord& record) override { m_client.log(record); }
+
+private:
+    Client& m_client;
 };
 
 } // namespace PostHog
