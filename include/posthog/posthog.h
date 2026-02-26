@@ -40,14 +40,15 @@
 
 #define POSTHOG_VERSION_MAJOR 1
 #define POSTHOG_VERSION_MINOR 7
-#define POSTHOG_VERSION_PATCH 0
-#define POSTHOG_VERSION "1.7.0"
+#define POSTHOG_VERSION_PATCH 1
+#define POSTHOG_VERSION "1.7.1"
 
 #include <string>
 #include <map>
 #include <vector>
 #include <functional>
 #include <memory>
+#include <nlohmann/json.hpp>
 
 namespace PostHog {
 
@@ -170,19 +171,24 @@ public:
      *
      * Events are queued and sent asynchronously. Each event automatically
      * includes $lib, $lib_version, $os, and posthog_cpp_version properties.
+     * Accepts flat string maps (backward compatible) or nested JSON objects.
      *
      * @param event Event name (e.g., "button_clicked", "file_opened")
-     * @param properties Optional key-value properties
+     * @param properties JSON properties (accepts map<string,string>, nested objects, arrays, etc.)
      *
      * @code
-     * client.track("purchase_completed", {
-     *     {"product_id", "abc123"},
-     *     {"amount", "29.99"}
+     * // Flat properties (backward compatible)
+     * client.track("purchase", {{"product_id", "abc123"}, {"amount", "29.99"}});
+     *
+     * // Nested properties
+     * client.track("installation_completed", {
+     *     {"success", true},
+     *     {"duration_seconds", 42},
+     *     {"installed_plugins", {{"QuickMatte", {{"version", "1.1.4"}}}}}
      * });
      * @endcode
      */
-    void track(const std::string& event,
-               const std::map<std::string, std::string>& properties = {});
+    void track(const std::string& event, const nlohmann::json& properties = nlohmann::json::object());
 
     /**
      * @brief Track an exception with stack trace
