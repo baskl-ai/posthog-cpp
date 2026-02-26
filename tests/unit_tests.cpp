@@ -7,10 +7,12 @@
 #include <posthog/machine_id.h>
 #include <posthog/stacktrace.h>
 #include <posthog/crash_handler.h>
+#include <posthog/logging.h>
 #include <iostream>
 #include <cassert>
 #include <fstream>
 #include <cstdio>
+#include <cstdlib>
 
 #define TEST(name) void test_##name()
 #define RUN_TEST(name) do { \
@@ -181,6 +183,145 @@ TEST(config_enabled_false_disables) {
     client.shutdown();
 }
 
+TEST(config_from_env) {
+#ifdef _WIN32
+    _putenv_s("POSTHOG_API_KEY", "phc_env");
+    _putenv_s("POSTHOG_HOST", "https://us.i.posthog.com");
+    _putenv_s("POSTHOG_APP_NAME", "env_app");
+    _putenv_s("POSTHOG_APP_VERSION", "9.9.9");
+#else
+    setenv("POSTHOG_API_KEY", "phc_env", 1);
+    setenv("POSTHOG_HOST", "https://us.i.posthog.com", 1);
+    setenv("POSTHOG_APP_NAME", "env_app", 1);
+    setenv("POSTHOG_APP_VERSION", "9.9.9", 1);
+#endif
+
+    PostHog::Config cfg = PostHog::Config::fromEnv();
+    CHECK(cfg.apiKey == "phc_env");
+    CHECK(cfg.host == "https://us.i.posthog.com");
+    CHECK(cfg.appName == "env_app");
+    CHECK(cfg.appVersion == "9.9.9");
+}
+
+TEST(log_auto_initialize) {
+    PostHog::Config config;
+    config.apiKey = "";
+    config.appName = "auto_init_test";
+
+    PostHog::Client client(config);
+    client.logInfo("hello");
+    CHECK(!client.getDistinctId().empty());
+    client.shutdown();
+}
+
+TEST(log_severity_mapping) {
+    using PostHog::LogLevel;
+    CHECK(PostHog::toSeverityNumber(LogLevel::Trace) == 1);
+    CHECK(PostHog::toSeverityNumber(LogLevel::Debug) == 5);
+    CHECK(PostHog::toSeverityNumber(LogLevel::Info) == 9);
+    CHECK(PostHog::toSeverityNumber(LogLevel::Warn) == 13);
+    CHECK(PostHog::toSeverityNumber(LogLevel::Error) == 17);
+    CHECK(PostHog::toSeverityNumber(LogLevel::Fatal) == 21);
+}
+
+TEST(log_record_json_serialization) {
+    using PostHog::AnyValue;
+    using PostHog::KeyValue;
+    using PostHog::LogLevel;
+    using PostHog::LogRecord;
+    using PostHog::ResourceLogs;
+    using PostHog::ScopeLogs;
+    using PostHog::InstrumentationScope;
+    using PostHog::ExportLogsServiceRequest;
+
+    LogRecord record;
+    record.time_unix_nano = 1234567890ULL;
+    record.severity = LogLevel::Info;
+    record.body = AnyValue("User clicked submit");
+    record.attributes = {
+        KeyValue{"button", AnyValue("submit")},
+        KeyValue{"latency_ms", AnyValue(128)},
+        KeyValue{"is_internal", AnyValue(true)},
+    };
+
+    ScopeLogs scope;
+    scope.scope = InstrumentationScope{"posthog-cpp", POSTHOG_VERSION};
+    scope.log_records.push_back(record);
+
+    ResourceLogs res;
+    res.resource_attributes = {
+        KeyValue{"service.name", AnyValue("MyApp")},
+        KeyValue{"service.version", AnyValue("1.0.0")},
+    };
+    res.scope_logs.push_back(scope);
+
+    ExportLogsServiceRequest req;
+    req.resource_logs.push_back(res);
+
+    auto j = PostHog::toJson(req);
+
+    CHECK(j["resourceLogs"].is_array());
+    CHECK(j["resourceLogs"].size() == 1);
+    CHECK(j["resourceLogs"][0]["scopeLogs"].size() == 1);
+    CHECK(j["resourceLogs"][0]["scopeLogs"][0]["logRecords"].size() == 1);
+
+    auto lr = j["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
+    CHECK(lr["severityNumber"] == 9);
+    CHECK(lr["severityText"] == "INFO");
+    CHECK(lr["body"]["stringValue"] == "User clicked submit");
+}
+
+TEST(log_trace_context_serialization) {
+    using PostHog::AnyValue;
+    using PostHog::LogLevel;
+    using PostHog::LogRecord;
+    using PostHog::ExportLogsServiceRequest;
+    using PostHog::ScopeLogs;
+    using PostHog::ResourceLogs;
+
+    LogRecord record;
+    record.severity = LogLevel::Error;
+    record.body = AnyValue("failure");
+    record.trace_id = PostHog::TraceId::fromHex("4bf92f3577b34da6a3ce929d0e0e4736");
+    record.span_id = PostHog::SpanId::fromHex("00f067aa0ba902b7");
+
+    ScopeLogs scope;
+    scope.log_records.push_back(record);
+
+    ResourceLogs res;
+    res.scope_logs.push_back(scope);
+
+    ExportLogsServiceRequest req;
+    req.resource_logs.push_back(res);
+
+    auto j = PostHog::toJson(req);
+    auto lr = j["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
+
+    CHECK(lr["traceId"] == "4bf92f3577b34da6a3ce929d0e0e4736");
+    CHECK(lr["spanId"] == "00f067aa0ba902b7");
+}
+
+TEST(log_request_target_and_auth) {
+    PostHog::Config config;
+    config.apiKey = "phc_test";
+    config.appName = "test";
+    config.appVersion = "1.0.0";
+    config.host = "https://us.i.posthog.com";
+
+    PostHog::Client client(config);
+    client.initialize();
+
+    auto req = client.buildLogRequest(
+        PostHog::LogRecord::info("hello", {{"k", PostHog::AnyValue("v")}})
+    );
+
+    CHECK(req.url == "https://us.i.posthog.com/i/v1/logs");
+    CHECK(req.headers.count("Authorization") == 1);
+    CHECK(req.headers.at("Authorization") == "Bearer phc_test");
+
+    client.shutdown();
+}
+
 TEST(crash_filter_with_module_addresses) {
     // Crash with 2+ addresses from our module - should be reported
     PostHog::CrashHandler::Report report;
@@ -258,6 +399,12 @@ int main() {
     RUN_TEST(optout_file_disables);
     RUN_TEST(no_optout_file_enables);
     RUN_TEST(config_enabled_false_disables);
+    RUN_TEST(config_from_env);
+    RUN_TEST(log_auto_initialize);
+    RUN_TEST(log_severity_mapping);
+    RUN_TEST(log_record_json_serialization);
+    RUN_TEST(log_trace_context_serialization);
+    RUN_TEST(log_request_target_and_auth);
 
     std::cout << "\n=== All tests passed! ===" << std::endl;
     return 0;

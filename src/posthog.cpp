@@ -7,6 +7,7 @@
 #include "posthog/machine_id.h"
 #include "posthog/stacktrace.h"
 #include "posthog/crash_handler.h"
+#include "posthog/logging.h"
 
 // Skip version check to avoid warnings when parent project uses different nlohmann/json version
 #define JSON_SKIP_LIBRARY_VERSION_CHECK
@@ -15,11 +16,12 @@
 #include <sstream>
 #include <thread>
 #include <mutex>
-#include <queue>
+#include <deque>
 #include <condition_variable>
 #include <chrono>
 #include <atomic>
 #include <ctime>
+#include <cstdlib>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -37,6 +39,24 @@ using json = nlohmann::json;
 
 namespace PostHog {
 
+static std::string getEnvVar(const char* name) {
+    const char* v = std::getenv(name);
+    return v ? std::string(v) : std::string();
+}
+
+Config Config::fromEnv() {
+    Config cfg;
+    std::string apiKey = getEnvVar("POSTHOG_API_KEY");
+    if (!apiKey.empty()) cfg.apiKey = apiKey;
+    std::string host = getEnvVar("POSTHOG_HOST");
+    if (!host.empty()) cfg.host = host;
+    std::string appName = getEnvVar("POSTHOG_APP_NAME");
+    if (!appName.empty()) cfg.appName = appName;
+    std::string appVersion = getEnvVar("POSTHOG_APP_VERSION");
+    if (!appVersion.empty()) cfg.appVersion = appVersion;
+    return cfg;
+}
+
 /**
  * @brief Internal implementation
  */
@@ -50,7 +70,20 @@ public:
     std::atomic<bool> initialized{false};
     std::atomic<bool> shutdownRequested{false};
 
-    std::queue<std::string> eventQueue;
+    enum class QueueType {
+        Event,
+        Log
+    };
+
+    struct QueuedItem {
+        QueueType type = QueueType::Event;
+        std::string url;
+        std::map<std::string, std::string> headers;
+        std::string body;
+        LogRecord logRecord;
+    };
+
+    std::deque<QueuedItem> eventQueue;
     std::mutex queueMutex;
     std::condition_variable queueCondition;
     std::thread workerThread;
@@ -99,6 +132,17 @@ public:
             enabled = false;
         }
 
+        // Apply defaults
+        if (config.appName.empty()) {
+            config.appName = "posthog-cpp";
+        }
+        if (config.appVersion.empty()) {
+            config.appVersion = POSTHOG_VERSION;
+        }
+        if (config.host.empty()) {
+            config.host = "https://eu.i.posthog.com";
+        }
+
         // Use custom distinct ID if provided, otherwise generate from MAC address
         if (!config.distinctId.empty()) {
             distinctId = config.distinctId;
@@ -118,6 +162,11 @@ public:
         initialized = true;
         std::cout << "[PostHog] Initialized, distinct_id: " << distinctId.substr(0, 8) << "..." << std::endl;
         return true;
+    }
+
+    bool ensureInitialized() {
+        if (initialized) return true;
+        return initialize();
     }
 
     /**
@@ -198,9 +247,15 @@ public:
 
         j["properties"] = props;
 
+        QueuedItem req;
+        req.type = QueueType::Event;
+        req.url = config.host + "/i/v0/e/";
+        req.headers["Content-Type"] = "application/json";
+        req.body = j.dump();
+
         {
             std::lock_guard<std::mutex> lock(queueMutex);
-            eventQueue.push(j.dump());
+            eventQueue.push_back(req);
         }
         queueCondition.notify_one();
 
@@ -265,9 +320,15 @@ public:
         props["$exception_list"] = exceptionList;
         j["properties"] = props;
 
+        QueuedItem req;
+        req.type = QueueType::Event;
+        req.url = config.host + "/i/v0/e/";
+        req.headers["Content-Type"] = "application/json";
+        req.body = j.dump();
+
         {
             std::lock_guard<std::mutex> lock(queueMutex);
-            eventQueue.push(j.dump());
+            eventQueue.push_back(req);
         }
         queueCondition.notify_one();
 
@@ -303,9 +364,15 @@ public:
 
         j["properties"] = props;
 
+        QueuedItem req;
+        req.type = QueueType::Event;
+        req.url = config.host + "/i/v0/e/";
+        req.headers["Content-Type"] = "application/json";
+        req.body = j.dump();
+
         {
             std::lock_guard<std::mutex> lock(queueMutex);
-            eventQueue.push(j.dump());
+            eventQueue.push_back(req);
         }
         queueCondition.notify_one();
 
@@ -467,9 +534,15 @@ public:
         props["$exception_list"] = exceptionList;
         j["properties"] = props;
 
+        QueuedItem req;
+        req.type = QueueType::Event;
+        req.url = config.host + "/i/v0/e/";
+        req.headers["Content-Type"] = "application/json";
+        req.body = j.dump();
+
         {
             std::lock_guard<std::mutex> lock(queueMutex);
-            eventQueue.push(j.dump());
+            eventQueue.push_back(req);
         }
         queueCondition.notify_one();
 
@@ -510,7 +583,7 @@ public:
 
     void workerLoop() {
         while (!shutdownRequested) {
-            std::string eventJson;
+            QueuedItem req;
 
             {
                 std::unique_lock<std::mutex> lock(queueMutex);
@@ -523,27 +596,60 @@ public:
                     continue;
                 }
 
-                eventJson = eventQueue.front();
-                eventQueue.pop();
+                req = eventQueue.front();
+                eventQueue.pop_front();
             }
 
-            sendEvent(eventJson);
+            if (req.type == QueueType::Event) {
+                sendRequest(req);
+            } else {
+                std::vector<LogRecord> batch;
+                batch.push_back(req.logRecord);
+
+                {
+                    std::lock_guard<std::mutex> lock(queueMutex);
+                    while (!eventQueue.empty() &&
+                           eventQueue.front().type == QueueType::Log &&
+                           static_cast<int>(batch.size()) < config.logBatchSize) {
+                        batch.push_back(eventQueue.front().logRecord);
+                        eventQueue.pop_front();
+                    }
+                }
+
+                LogRequest logReq = buildLogRequest(batch);
+                QueuedItem q;
+                q.type = QueueType::Event;
+                q.url = logReq.url;
+                q.headers = logReq.headers;
+                q.body = logReq.body;
+                sendRequest(q);
+            }
         }
 
         // Flush remaining events on shutdown
         while (true) {
-            std::string eventJson;
+            QueuedItem req;
             {
                 std::lock_guard<std::mutex> lock(queueMutex);
                 if (eventQueue.empty()) break;
-                eventJson = eventQueue.front();
-                eventQueue.pop();
+                req = eventQueue.front();
+                eventQueue.pop_front();
             }
-            sendEvent(eventJson);
+            if (req.type == QueueType::Event) {
+                sendRequest(req);
+            } else {
+                LogRequest logReq = buildLogRequest({req.logRecord});
+                QueuedItem q;
+                q.type = QueueType::Event;
+                q.url = logReq.url;
+                q.headers = logReq.headers;
+                q.body = logReq.body;
+                sendRequest(q);
+            }
         }
     }
 
-    void sendEvent(const std::string& eventJson) {
+    void sendRequest(const QueuedItem& req) {
 #ifdef POSTHOG_USE_CURL
         CURL* curl = curl_easy_init();
         if (!curl) {
@@ -551,15 +657,16 @@ public:
             return;
         }
 
-        std::string url = config.host + "/i/v0/e/";
-
         struct curl_slist* headers = nullptr;
-        headers = curl_slist_append(headers, "Content-Type: application/json");
+        for (const auto& [key, value] : req.headers) {
+            std::string header = key + ": " + value;
+            headers = curl_slist_append(headers, header.c_str());
+        }
 
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_URL, req.url.c_str());
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, eventJson.c_str());
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, eventJson.length());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.body.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, req.body.length());
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
 
         CURLcode res = curl_easy_perform(curl);
@@ -570,8 +677,38 @@ public:
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
 #else
-        std::cout << "[PostHog] Would send: " << eventJson.substr(0, 100) << "..." << std::endl;
+        std::cout << "[PostHog] Would send: " << req.body.substr(0, 100) << "..." << std::endl;
 #endif
+    }
+
+    LogRequest buildLogRequest(const std::vector<LogRecord>& records) const {
+        std::string appName = config.appName.empty() ? "posthog-cpp" : config.appName;
+        std::string appVersion = config.appVersion.empty() ? POSTHOG_VERSION : config.appVersion;
+        std::string host = config.host.empty() ? "https://eu.i.posthog.com" : config.host;
+
+        ExportLogsServiceRequest req;
+
+        ScopeLogs scope;
+        scope.scope = InstrumentationScope{appName, appVersion};
+        for (const auto& r : records) {
+            scope.log_records.push_back(r);
+        }
+
+        ResourceLogs resource;
+        resource.resource_attributes = {
+            KeyValue{"service.name", AnyValue(appName)},
+            KeyValue{"service.version", AnyValue(appVersion)},
+        };
+        resource.scope_logs.push_back(scope);
+
+        req.resource_logs.push_back(resource);
+
+        LogRequest out;
+        out.url = host + "/i/v1/logs";
+        out.headers["Content-Type"] = "application/json";
+        out.headers["Authorization"] = "Bearer " + config.apiKey;
+        out.body = toJson(req).dump();
+        return out;
     }
 };
 
@@ -598,6 +735,7 @@ std::string Client::getDistinctId() const {
 }
 
 void Client::track(const std::string& event, const std::map<std::string, std::string>& properties) {
+    if (!m_impl->ensureInitialized()) return;
     m_impl->track(event, properties);
 }
 
@@ -605,11 +743,81 @@ void Client::trackException(const std::string& errorType,
                             const std::string& errorMessage,
                             const std::string& component,
                             const std::map<std::string, std::string>& properties) {
+    if (!m_impl->ensureInitialized()) return;
     m_impl->trackException(errorType, errorMessage, component, properties);
 }
 
 void Client::setPersonProperties(const std::map<std::string, std::string>& properties, bool setOnce) {
+    if (!m_impl->ensureInitialized()) return;
     m_impl->setPersonProperties(properties, setOnce);
+}
+
+void Client::log(const LogRecord& record) {
+    if (!m_impl->ensureInitialized()) return;
+    if (!m_impl->enabled) return;
+
+    bool notify = false;
+    {
+        std::lock_guard<std::mutex> lock(m_impl->queueMutex);
+        if (m_impl->eventQueue.size() >= m_impl->config.maxQueueSize) {
+            if (record.severity == LogLevel::Trace || record.severity == LogLevel::Debug) {
+                std::cerr << "[PostHog] Dropping low-severity log (queue full)" << std::endl;
+                return;
+            }
+            bool dropped = false;
+            for (auto it = m_impl->eventQueue.begin(); it != m_impl->eventQueue.end(); ++it) {
+                if (it->type == Impl::QueueType::Log) {
+                    m_impl->eventQueue.erase(it);
+                    dropped = true;
+                    break;
+                }
+            }
+            if (!dropped) {
+                std::cerr << "[PostHog] Dropping log (queue full)" << std::endl;
+                return;
+            }
+        }
+
+        Impl::QueuedItem q;
+        q.type = Impl::QueueType::Log;
+        q.logRecord = record;
+        m_impl->eventQueue.push_back(q);
+
+        if (m_impl->eventQueue.size() >= static_cast<size_t>(m_impl->config.logBatchSize)) {
+            notify = true;
+        }
+    }
+    if (notify) {
+        m_impl->queueCondition.notify_one();
+    }
+}
+
+void Client::logInfo(const std::string& message, const std::vector<KeyValue>& attributes) {
+    log(LogRecord::info(message, attributes));
+}
+
+void Client::logDebug(const std::string& message, const std::vector<KeyValue>& attributes) {
+    log(LogRecord::withLevel(LogLevel::Debug, message, attributes));
+}
+
+void Client::logTrace(const std::string& message, const std::vector<KeyValue>& attributes) {
+    log(LogRecord::withLevel(LogLevel::Trace, message, attributes));
+}
+
+void Client::logWarn(const std::string& message, const std::vector<KeyValue>& attributes) {
+    log(LogRecord::withLevel(LogLevel::Warn, message, attributes));
+}
+
+void Client::logError(const std::string& message, const std::vector<KeyValue>& attributes) {
+    log(LogRecord::withLevel(LogLevel::Error, message, attributes));
+}
+
+void Client::logFatal(const std::string& message, const std::vector<KeyValue>& attributes) {
+    log(LogRecord::withLevel(LogLevel::Fatal, message, attributes));
+}
+
+LogRequest Client::buildLogRequest(const LogRecord& record) const {
+    return m_impl->buildLogRequest({record});
 }
 
 void Client::installCrashHandler(const std::string& crashDir) {

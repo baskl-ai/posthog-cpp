@@ -20,3 +20,7 @@ target_link_libraries(basic PRIVATE posthog)
 # Crash handler example (requires API key)
 add_executable(crash crash.cpp)
 target_link_libraries(crash PRIVATE posthog)
+
+# Logging example (requires API key)
+add_executable(logging_example ../examples/logging.cpp)
+target_link_libraries(logging_example PRIVATE posthog)
