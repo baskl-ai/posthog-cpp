@@ -227,7 +227,7 @@ public:
         osInfo = os + " " + arch + " " + version;
     }
 
-    void track(const std::string& event, const std::map<std::string, std::string>& properties) {
+    void track(const std::string& event, const nlohmann::json& properties) {
         if (!enabled || !initialized) return;
 
         json j;
@@ -241,8 +241,8 @@ public:
         props["$os"] = osInfo;
         props["posthog_cpp_version"] = POSTHOG_VERSION;
 
-        for (const auto& [key, value] : properties) {
-            props[key] = value;
+        if (properties.is_object()) {
+            props.update(properties);
         }
 
         j["properties"] = props;
@@ -734,7 +734,7 @@ std::string Client::getDistinctId() const {
     return m_impl->distinctId;
 }
 
-void Client::track(const std::string& event, const std::map<std::string, std::string>& properties) {
+void Client::track(const std::string& event, const nlohmann::json& properties) {
     if (!m_impl->ensureInitialized()) return;
     m_impl->track(event, properties);
 }

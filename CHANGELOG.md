@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.7.1] - 2026-02-27
+
+### Changed
+- `track()` now accepts `nlohmann::json` instead of `map<string,string>` - supports nested objects, arrays, numbers, booleans
+- Backward compatible: existing `{{"key", "value"}}` calls work as before
+
 ## [1.7.0] - 2026-02-20
 
 ### Added
