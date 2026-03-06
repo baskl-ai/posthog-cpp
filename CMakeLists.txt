@@ -18,6 +18,7 @@ set(POSTHOG_HEADERS
     include/posthog/machine_id.h
     include/posthog/stacktrace.h
     include/posthog/crash_handler.h
+    include/posthog/logging.h
 )
 
 # Create library
