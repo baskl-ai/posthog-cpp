@@ -36,6 +36,12 @@
 
 using json = nlohmann::json;
 
+#ifdef POSTHOG_USE_CURL
+static size_t discardCurlResponse(char *, size_t size, size_t nmemb, void *) {
+    return size * nmemb;
+}
+#endif
+
 namespace PostHog {
 
 /**
@@ -575,6 +581,7 @@ public:
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, eventJson.c_str());
         curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, eventJson.length());
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, discardCurlResponse);
 
         CURLcode res = curl_easy_perform(curl);
         if (res != CURLE_OK) {
