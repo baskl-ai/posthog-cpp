@@ -11,6 +11,7 @@
 // Skip version check to avoid warnings when parent project uses different nlohmann/json version
 #define JSON_SKIP_LIBRARY_VERSION_CHECK
 #include <nlohmann/json.hpp>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -61,6 +62,19 @@ public:
         shutdown();
     }
 
+    std::ostream& diagError() {
+        static std::ofstream null;
+        return (config.diagLevel >= 1) ? std::cerr : null;
+    }
+    std::ostream& diagInfo() {
+        static std::ofstream null;
+        return (config.diagLevel >= 2) ? std::cout : null;
+    }
+    std::ostream& diagDebug() {
+        static std::ofstream null;
+        return (config.diagLevel >= 3) ? std::cout : null;
+    }
+
     /**
      * @brief Check if analytics opt-out marker file exists in user's home directory
      * @return true if ~/.posthog_optout exists (user has opted out)
@@ -91,7 +105,7 @@ public:
         // Check for user opt-out file (~/.posthog_optout)
         if (checkOptOutFile()) {
             enabled = false;
-            std::cout << "[PostHog] Analytics disabled via ~/.posthog_optout" << std::endl;
+            diagInfo() << "[PostHog] Analytics disabled via ~/.posthog_optout" << std::endl;
         }
 
         // Respect config.enabled
@@ -116,7 +130,7 @@ public:
         workerThread = std::thread(&Impl::workerLoop, this);
 
         initialized = true;
-        std::cout << "[PostHog] Initialized, distinct_id: " << distinctId.substr(0, 8) << "..." << std::endl;
+        diagInfo() << "[PostHog] Initialized, distinct_id: " << distinctId.substr(0, 8) << "..." << std::endl;
         return true;
     }
 
@@ -204,7 +218,7 @@ public:
         }
         queueCondition.notify_one();
 
-        std::cout << "[PostHog] Queued event: " << event << std::endl;
+        diagDebug() << "[PostHog] Queued event: " << event << std::endl;
     }
 
     void trackException(const std::string& errorType,
@@ -271,7 +285,7 @@ public:
         }
         queueCondition.notify_one();
 
-        std::cout << "[PostHog] Queued exception: " << errorType << std::endl;
+        diagDebug() << "[PostHog] Queued exception: " << errorType << std::endl;
     }
 
     void setPersonProperties(const std::map<std::string, std::string>& properties, bool setOnce) {
@@ -309,8 +323,8 @@ public:
         }
         queueCondition.notify_one();
 
-        std::cout << "[PostHog] Queued person properties ("
-                  << (setOnce ? "$set_once" : "$set") << ")" << std::endl;
+        diagDebug() << "[PostHog] Queued person properties ("
+                    << (setOnce ? "$set_once" : "$set") << ")" << std::endl;
     }
 
     /**
@@ -430,7 +444,7 @@ public:
             std::string logs = CrashHandler::readLastLines(logConfig.path, logConfig.maxLines);
             if (!logs.empty()) {
                 props["recent_logs"] = logs;
-                std::cout << "[PostHog] Attached " << logConfig.maxLines << " lines from log file" << std::endl;
+                diagDebug() << "[PostHog] Attached " << logConfig.maxLines << " lines from log file" << std::endl;
             }
         }
 
@@ -473,7 +487,7 @@ public:
         }
         queueCondition.notify_one();
 
-        std::cout << "[PostHog] Queued crash report: " << report.signalName << std::endl;
+        diagDebug() << "[PostHog] Queued crash report: " << report.signalName << std::endl;
     }
 
     void flush(int timeoutMs) {
@@ -486,7 +500,7 @@ public:
             }
 
             if (std::chrono::steady_clock::now() >= deadline) {
-                std::cerr << "[PostHog] Flush timeout" << std::endl;
+                diagError() << "[PostHog] Flush timeout" << std::endl;
                 break;
             }
 
@@ -505,7 +519,7 @@ public:
         }
 
         initialized = false;
-        std::cout << "[PostHog] Shutdown complete" << std::endl;
+        diagInfo() << "[PostHog] Shutdown complete" << std::endl;
     }
 
     void workerLoop() {
@@ -547,7 +561,7 @@ public:
 #ifdef POSTHOG_USE_CURL
         CURL* curl = curl_easy_init();
         if (!curl) {
-            std::cerr << "[PostHog] Failed to init curl" << std::endl;
+            diagError() << "[PostHog] Failed to init curl" << std::endl;
             return;
         }
 
@@ -564,13 +578,13 @@ public:
 
         CURLcode res = curl_easy_perform(curl);
         if (res != CURLE_OK) {
-            std::cerr << "[PostHog] Send failed: " << curl_easy_strerror(res) << std::endl;
+            diagError() << "[PostHog] Send failed: " << curl_easy_strerror(res) << std::endl;
         }
 
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
 #else
-        std::cout << "[PostHog] Would send: " << eventJson.substr(0, 100) << "..." << std::endl;
+        diagDebug() << "[PostHog] Would send: " << eventJson.substr(0, 100) << "..." << std::endl;
 #endif
     }
 };
@@ -618,11 +632,11 @@ void Client::installCrashHandler(const std::string& crashDir) {
         : crashDir;
 
     if (!CrashHandler::install(dir)) {
-        std::cerr << "[PostHog] Failed to install crash handler" << std::endl;
+        m_impl->diagError() << "[PostHog] Failed to install crash handler" << std::endl;
         return;
     }
 
-    std::cout << "[PostHog] Crash handler installed: " << CrashHandler::getCrashFilePath() << std::endl;
+    m_impl->diagInfo() << "[PostHog] Crash handler installed: " << CrashHandler::getCrashFilePath() << std::endl;
 
     // Check for pending crash report
     auto report = CrashHandler::loadPendingReport();
@@ -630,10 +644,10 @@ void Client::installCrashHandler(const std::string& crashDir) {
         // Filter out crashes that don't involve our module
         // This prevents reporting crashes from other plugins or host app
         if (CrashHandler::hasAddressesFromOurModule(*report)) {
-            std::cout << "[PostHog] Found crash report from our module: " << report->signalName << std::endl;
+            m_impl->diagInfo() << "[PostHog] Found crash report from our module: " << report->signalName << std::endl;
             m_impl->trackCrashReport(*report);
         } else {
-            std::cout << "[PostHog] Ignoring crash report (not from our module): " << report->signalName << std::endl;
+            m_impl->diagInfo() << "[PostHog] Ignoring crash report (not from our module): " << report->signalName << std::endl;
         }
         CrashHandler::clearPendingReport();
         CrashHandler::clearMetadata();
@@ -643,16 +657,16 @@ void Client::installCrashHandler(const std::string& crashDir) {
 
 void Client::setCrashMetadata(const std::map<std::string, std::string>& metadata) {
     if (!CrashHandler::isInstalled()) {
-        std::cerr << "[PostHog] Warning: setCrashMetadata called before installCrashHandler" << std::endl;
+        m_impl->diagError() << "[PostHog] Warning: setCrashMetadata called before installCrashHandler" << std::endl;
         return;
     }
 
     CrashHandler::Metadata md;
     md.properties = metadata;
     if (CrashHandler::saveMetadata(md)) {
-        std::cout << "[PostHog] Crash metadata saved (" << metadata.size() << " properties)" << std::endl;
+        m_impl->diagDebug() << "[PostHog] Crash metadata saved (" << metadata.size() << " properties)" << std::endl;
     } else {
-        std::cerr << "[PostHog] Failed to save crash metadata" << std::endl;
+        m_impl->diagError() << "[PostHog] Failed to save crash metadata" << std::endl;
     }
 }
 
@@ -660,7 +674,7 @@ void Client::setLogFile(const std::string& logFilePath, int maxLines) {
     // Check if crash handler is installed by verifying crash file path exists
     std::string crashPath = CrashHandler::getCrashFilePath();
     if (crashPath.empty()) {
-        std::cerr << "[PostHog] Warning: setLogFile called before installCrashHandler" << std::endl;
+        m_impl->diagError() << "[PostHog] Warning: setLogFile called before installCrashHandler" << std::endl;
         return;
     }
 
@@ -668,9 +682,9 @@ void Client::setLogFile(const std::string& logFilePath, int maxLines) {
     config.path = logFilePath;
     config.maxLines = maxLines;
     if (CrashHandler::saveLogFileConfig(config)) {
-        std::cout << "[PostHog] Log file configured: " << logFilePath << " (max " << maxLines << " lines)" << std::endl;
+        m_impl->diagDebug() << "[PostHog] Log file configured: " << logFilePath << " (max " << maxLines << " lines)" << std::endl;
     } else {
-        std::cerr << "[PostHog] Failed to save log file config" << std::endl;
+        m_impl->diagError() << "[PostHog] Failed to save log file config" << std::endl;
     }
 }
 

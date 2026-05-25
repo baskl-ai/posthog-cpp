@@ -72,6 +72,7 @@ struct Config {
     std::string crashReportsDir;         ///< Custom crash directory (uses platform default if empty)
     int flushIntervalMs = 30000;         ///< Background flush interval in milliseconds
     int flushBatchSize = 10;             ///< Max events per batch (not currently used)
+    int diagLevel = 3;                   ///< Diagnostic output: 0=silent, 1=errors, 2=info, 3=debug
     bool enabled = true;                 ///< If false, all tracking calls become no-ops
 };
 
