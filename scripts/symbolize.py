@@ -112,7 +112,7 @@ def symbolize_address_addr2line(binary: str, address: str) -> str:
             timeout=5
         )
         output = result.stdout.strip()
-        if output and "??" not in output:
+        if output and not output.startswith("??"):
             return output
     except FileNotFoundError:
         pass  # addr2line not installed, silently skip
