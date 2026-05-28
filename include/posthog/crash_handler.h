@@ -30,6 +30,7 @@
 #include <ctime>
 #include <cstring>
 #include <cstdlib>
+#include <cstdint>
 #include <deque>
 
 #ifdef _WIN32
@@ -91,8 +92,8 @@ namespace Internal {
     static char g_crashFilePath[512] = {0};
     static char g_crashBuffer[8192] = {0};
     static bool g_installed = false;
-    static unsigned long g_loadAddress = 0;
-    static unsigned long g_moduleSize = 0;  // Size of our module for address filtering
+    static std::uintptr_t g_loadAddress = 0;
+    static std::size_t g_moduleSize = 0;  // Size of our module for address filtering
     static char g_execPath[512] = {0};
 
     inline void safeCopy(char* dest, const char* src, size_t maxLen) {
@@ -127,22 +128,22 @@ namespace Internal {
         buffer[j] = '\0';
     }
 
-    inline void safeUlongToHex(unsigned long value, char* buffer, size_t bufferSize) {
+    inline void safeUlongToHex(std::uintptr_t value, char* buffer, size_t bufferSize) {
         if (bufferSize < 3) return;
 
         buffer[0] = '0';
         buffer[1] = 'x';
 
         char hexChars[] = "0123456789abcdef";
-        char temp[20];
+        char temp[2 * sizeof(std::uintptr_t)];
         int i = 0;
 
         if (value == 0) {
             temp[i++] = '0';
         } else {
-            while (value > 0 && i < 16) {
-                temp[i++] = hexChars[value & 0xF];
-                value >>= 4;
+            while (value > 0 && i < (int)sizeof(temp)) {
+                temp[i++] = hexChars[static_cast<unsigned int>(value & 0xF)];
+                value >>= 4U;
             }
         }
 
@@ -201,7 +202,7 @@ namespace Internal {
             remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
 
             char addrStr[32];
-            safeUlongToHex(reinterpret_cast<unsigned long>(info->si_addr), addrStr, sizeof(addrStr));
+            safeUlongToHex(reinterpret_cast<std::uintptr_t>(info->si_addr), addrStr, sizeof(addrStr));
             safeCopy(ptr, addrStr, remaining);
             ptr += strlen(ptr);
             remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
@@ -233,7 +234,7 @@ namespace Internal {
         remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
 
         char moduleSizeStr[32];
-        safeUlongToHex(g_moduleSize, moduleSizeStr, sizeof(moduleSizeStr));
+        safeUlongToHex(static_cast<std::uintptr_t>(g_moduleSize), moduleSizeStr, sizeof(moduleSizeStr));
         safeCopy(ptr, moduleSizeStr, remaining);
         ptr += strlen(ptr);
         remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
@@ -254,13 +255,13 @@ namespace Internal {
         int frameCount = backtrace(frames, 32);
 
         for (int i = 0; i < frameCount && remaining > 64; i++) {
-            unsigned long addr = reinterpret_cast<unsigned long>(frames[i]);
+            std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(frames[i]);
             char hexChars[] = "0123456789abcdef";
             int j = 0;
             char temp[20];
             do {
-                temp[j++] = hexChars[addr & 0xF];
-                addr >>= 4;
+                temp[j++] = hexChars[static_cast<unsigned int>(addr & 0xF)];
+                addr >>= 4U;
             } while (addr > 0);
 
             safeCopy(ptr, "  0x", remaining);
@@ -345,7 +346,7 @@ namespace Internal {
         remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
 
         char moduleSizeStr[32];
-        safeUlongToHex(g_moduleSize, moduleSizeStr, sizeof(moduleSizeStr));
+        safeUlongToHex(static_cast<std::uintptr_t>(g_moduleSize), moduleSizeStr, sizeof(moduleSizeStr));
         safeCopy(ptr, moduleSizeStr, remaining);
         ptr += strlen(ptr);
         remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
@@ -530,13 +531,13 @@ inline bool install(const std::string& crashDir) {
     GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                        reinterpret_cast<LPCSTR>(&install), &hModule);
     if (hModule) {
-        Internal::g_loadAddress = reinterpret_cast<unsigned long>(hModule);
+        Internal::g_loadAddress = reinterpret_cast<std::uintptr_t>(hModule);
         MODULEINFO modInfo;
         if (GetModuleInformation(GetCurrentProcess(), hModule, &modInfo, sizeof(modInfo))) {
-            Internal::g_moduleSize = modInfo.SizeOfImage;
+            Internal::g_moduleSize = static_cast<std::size_t>(modInfo.SizeOfImage);
         }
     } else {
-        Internal::g_loadAddress = reinterpret_cast<unsigned long>(GetModuleHandle(NULL));
+        Internal::g_loadAddress = reinterpret_cast<std::uintptr_t>(GetModuleHandle(NULL));
     }
 
     // Initialize symbol handler for better stack traces (best effort, ignore errors)
@@ -561,7 +562,7 @@ inline bool install(const std::string& crashDir) {
 
     Dl_info info;
     if (dladdr(reinterpret_cast<void*>(&install), &info)) {
-        Internal::g_loadAddress = reinterpret_cast<unsigned long>(info.dli_fbase);
+        Internal::g_loadAddress = reinterpret_cast<std::uintptr_t>(info.dli_fbase);
 
         // Get module size by finding the loaded image
 #ifdef __APPLE__
@@ -576,7 +577,7 @@ inline bool install(const std::string& crashDir) {
                     for (uint32_t j = 0; j < header64->ncmds; j++) {
                         if (cmd->cmd == LC_SEGMENT_64) {
                             const struct segment_command_64* seg = reinterpret_cast<const struct segment_command_64*>(cmd);
-                            unsigned long segEnd = seg->vmaddr + seg->vmsize;
+                            std::size_t segEnd = static_cast<std::size_t>(seg->vmaddr + seg->vmsize);
                             if (segEnd > Internal::g_moduleSize) {
                                 Internal::g_moduleSize = segEnd;
                             }
