@@ -68,6 +68,7 @@ struct Report {
     std::string loadAddress;     ///< Load address for symbolication
     std::string moduleSize;      ///< Size of our module (for address range filtering)
     std::string execPath;        ///< Path to executable
+    std::string debugId;         ///< Module debug id (Mach-O LC_UUID) for server-side symbolication
 };
 
 /**
@@ -94,6 +95,14 @@ namespace Internal {
     static unsigned long g_loadAddress = 0;
     static unsigned long g_moduleSize = 0;  // Size of our module for address filtering
     static char g_execPath[512] = {0};
+    // Module debug id (Mach-O LC_UUID), pre-formatted at install() time so the signal
+    // handler can write it without any allocation. Formatted as an uppercase,
+    // dash-separated UUID (8-4-4-4-12, 36 chars) to byte-for-byte match the symbol-set
+    // ref posthog-cli stores for an uploaded dSYM (`dwarfdump` UUID, upper-cased). The
+    // PostHog lookup is a case-sensitive exact match, so the format must match exactly.
+    // Empty when unavailable (e.g. non-Apple platforms). PostHog matches uploaded
+    // dSYM/symbol sets to crash frames by this id via the event's $debug_images.
+    static char g_debugId[37] = {0};
 
     inline void safeCopy(char* dest, const char* src, size_t maxLen) {
         size_t i = 0;
@@ -246,6 +255,16 @@ namespace Internal {
         ptr += strlen(ptr);
         remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
 
+        if (g_debugId[0] != '\0') {
+            safeCopy(ptr, "\nDEBUG_ID: ", remaining);
+            ptr += strlen(ptr);
+            remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+            safeCopy(ptr, g_debugId, remaining);
+            ptr += strlen(ptr);
+            remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+        }
+
         safeCopy(ptr, "\nSTACKTRACE:\n", remaining);
         ptr += strlen(ptr);
         remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
@@ -357,6 +376,16 @@ namespace Internal {
         safeCopy(ptr, g_execPath, remaining);
         ptr += strlen(ptr);
         remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+        if (g_debugId[0] != '\0') {
+            safeCopy(ptr, "\nDEBUG_ID: ", remaining);
+            ptr += strlen(ptr);
+            remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+            safeCopy(ptr, g_debugId, remaining);
+            ptr += strlen(ptr);
+            remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+        }
 
         safeCopy(ptr, "\nSTACKTRACE:\n", remaining);
         ptr += strlen(ptr);
@@ -580,6 +609,23 @@ inline bool install(const std::string& crashDir) {
                             if (segEnd > Internal::g_moduleSize) {
                                 Internal::g_moduleSize = segEnd;
                             }
+                        } else if (cmd->cmd == LC_UUID) {
+                            // The Mach-O UUID is the module's debug id: it matches the
+                            // dSYM uploaded to PostHog, letting cymbal symbolicate frames.
+                            // Pre-format it here (32 uppercase hex chars, no dashes) so the
+                            // async-signal-safe crash handler only has to copy the string.
+                            const struct uuid_command* uc = reinterpret_cast<const struct uuid_command*>(cmd);
+                            static const char kHex[] = "0123456789ABCDEF";
+                            int pos = 0;
+                            for (int b = 0; b < 16; b++) {
+                                // Dashes after bytes 4, 6, 8, 10 -> 8-4-4-4-12 layout.
+                                if (b == 4 || b == 6 || b == 8 || b == 10) {
+                                    Internal::g_debugId[pos++] = '-';
+                                }
+                                Internal::g_debugId[pos++] = kHex[(uc->uuid[b] >> 4) & 0xF];
+                                Internal::g_debugId[pos++] = kHex[uc->uuid[b] & 0xF];
+                            }
+                            Internal::g_debugId[pos] = '\0';
                         }
                         cmd = reinterpret_cast<const struct load_command*>(reinterpret_cast<const char*>(cmd) + cmd->cmdsize);
                     }
@@ -627,6 +673,9 @@ inline bool install(const std::string& crashDir) {
             f << "LOAD_ADDR: 0x" << std::hex << Internal::g_loadAddress << "\n";
             f << "MODULE_SIZE: 0x" << std::hex << Internal::g_moduleSize << "\n";
             f << "EXEC_PATH: " << Internal::g_execPath << "\n";
+            if (Internal::g_debugId[0] != '\0') {
+                f << "DEBUG_ID: " << Internal::g_debugId << "\n";
+            }
             f << "MESSAGE: " << msg << "\n";
             f.close();
         }
@@ -741,6 +790,9 @@ inline std::optional<Report> loadPendingReport() {
             inStacktrace = false;
         } else if (line.rfind("EXEC_PATH: ", 0) == 0) {
             report.execPath = line.substr(11);
+            inStacktrace = false;
+        } else if (line.rfind("DEBUG_ID: ", 0) == 0) {
+            report.debugId = line.substr(10);
             inStacktrace = false;
         } else if (line.rfind("MESSAGE: ", 0) == 0) {
             report.stacktrace = line.substr(9);

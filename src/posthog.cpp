@@ -22,6 +22,7 @@
 #include <atomic>
 #include <ctime>
 #include <cstdlib>
+#include <cctype>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -513,18 +514,47 @@ public:
         stacktrace["type"] = "raw";
         json framesList = json::array();
 
+        // When we captured the module's debug id (Mach-O UUID) we can hand PostHog
+        // everything cymbal needs to symbolicate server-side: each frame's absolute
+        // instruction address as `instruction_addr` on a "native" frame, plus an
+        // event-level `$debug_images` entry keyed by debug_id + load address that
+        // the uploaded dSYM is matched against. Without a debug id there is nothing
+        // to match, so we keep the legacy "custom" frames (raw text, offline-only
+        // symbolication via scripts/symbolize.py).
+        const bool canSymbolicate = !report.debugId.empty();
+
         std::istringstream ss(report.stacktrace);
         std::string line;
         while (std::getline(ss, line)) {
-            if (line.find("0x") != std::string::npos) {
-                json f;
-                f["platform"] = "custom";
-                f["lang"] = "cpp";
-                f["function"] = line;
-                f["in_app"] = true;
-                f["resolved"] = false;
-                framesList.push_back(f);
+            size_t hexPos = line.find("0x");
+            if (hexPos == std::string::npos) {
+                continue;
             }
+
+            json f;
+            f["lang"] = "cpp";
+            f["in_app"] = true;
+            f["resolved"] = false;
+
+            if (canSymbolicate) {
+                // Extract the leading hex token (e.g. "0x302b7ef74") as the address.
+                size_t end = hexPos + 2;
+                while (end < line.size() && std::isxdigit(static_cast<unsigned char>(line[end]))) {
+                    end++;
+                }
+                f["platform"] = "native";
+                f["instruction_addr"] = line.substr(hexPos, end - hexPos);
+                if (!report.loadAddress.empty()) {
+                    f["image_addr"] = report.loadAddress;
+                }
+                // Keep the raw line as a human-readable fallback if a frame can't be resolved.
+                f["function"] = line;
+            } else {
+                f["platform"] = "custom";
+                f["function"] = line;
+            }
+
+            framesList.push_back(f);
         }
 
         stacktrace["frames"] = framesList;
@@ -532,6 +562,33 @@ public:
         exceptionList.push_back(exception);
 
         props["$exception_list"] = exceptionList;
+
+        // Debug images let PostHog map the raw addresses above to the uploaded dSYM.
+        if (canSymbolicate) {
+            json image;
+            image["debug_id"] = report.debugId;
+            if (!report.loadAddress.empty()) {
+                image["image_addr"] = report.loadAddress;
+            }
+            if (!report.moduleSize.empty()) {
+                try {
+                    image["image_size"] = std::stoull(report.moduleSize, nullptr, 16);
+                } catch (...) {
+                    // Non-fatal: image_size is optional for symbolication.
+                }
+            }
+            if (!report.execPath.empty()) {
+                image["code_file"] = report.execPath;
+            }
+            if (report.platform == "macOS") {
+                image["type"] = "macho";
+            } else if (report.platform == "Windows") {
+                image["type"] = "pe";
+            } else {
+                image["type"] = "elf";
+            }
+            props["$debug_images"] = json::array({image});
+        }
         j["properties"] = props;
 
         QueuedItem req;
