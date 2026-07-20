@@ -103,24 +103,45 @@ Based on `config.appName`:
 ### How It Works
 
 1. **Crash occurs** → signal handler saves raw addresses to `pending_crash.txt`
-2. **Next launch** → `installCrashHandler()` detects the file and sends `$exception` event
-3. **PostHog** → shows crash in Error Tracking
+2. **Next launch** → `installCrashHandler()` detects the file, normalizes each in-module
+   frame to a stable module-relative offset (`<module>+0x…`), and sends an `$exception`
+   event with an explicit `$exception_fingerprint`
+3. **PostHog** → shows the crash in Error Tracking, grouped correctly across launches
+
+#### Grouping across launches
+
+Frame addresses are captured as absolute runtime addresses, but ASLR loads the module at a
+different base on every launch — so the raw addresses differ each time and every crash would
+otherwise become a brand-new Error Tracking issue. Before sending, the SDK subtracts the
+module `load_address` from any frame inside the module range, turning it into an
+ASLR-independent offset, and sets `$exception_fingerprint` from the signal type plus those
+offsets. Identical crashes now dedupe into a single issue. Frames outside the module (system
+libraries) are left untouched.
 
 ### Symbolization
 
-Crash stack traces contain only memory addresses. To get function names and line numbers:
+Crash frames are sent as module-relative offsets (`<module>+0x…`), which can be symbolized
+directly against the binary — no load address needed:
 
 ```bash
 python scripts/symbolize.py \
-    --executable /path/to/MyApp \
-    --load-address 0x104504000 \
-    --addresses 0x104507698 0x104505bf4 0x104506a10
+    --json exception_list.json \
+    --binary /path/to/MyApp
+```
+
+Legacy events (bare absolute addresses) still work by supplying the load address:
+
+```bash
+python scripts/symbolize.py \
+    --addr 0x104507698 \
+    --load-addr 0x104504000 \
+    --binary /path/to/MyApp
 ```
 
 **Requirements:**
 - Original executable (same build that crashed)
 - Debug symbols: `.dSYM` (macOS), `.pdb` (Windows), or debug build (Linux)
-- Load address from crash report (`load_address` property in PostHog)
+- Load address from crash report (`load_address` property in PostHog) — only for legacy events
 
 **Output:**
 ```
@@ -133,7 +154,7 @@ python scripts/symbolize.py \
 |                      | `trackException()`  | Crash Handler              |
 |----------------------|---------------------|----------------------------|
 | **When**             | Runtime (try/catch) | Signal (SIGSEGV, etc.)     |
-| **Function names**   | ✅ Resolved         | ❌ Addresses only           |
+| **Function names**   | ✅ Resolved         | ❌ Offsets only (symbolize) |
 | **Line numbers**     | ❌ No               | ❌ No (needs symbolization) |
 | **Sent immediately** | ✅ Yes              | ❌ Next launch              |
 

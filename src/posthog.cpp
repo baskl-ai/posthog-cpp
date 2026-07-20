@@ -22,6 +22,7 @@
 #include <atomic>
 #include <ctime>
 #include <cstdlib>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -509,18 +510,47 @@ public:
         exception["mechanism"]["handled"] = false;
         exception["mechanism"]["synthetic"] = false;
 
+        // Parse the module load address (and size) so we can turn ASLR-slid
+        // absolute frame addresses into stable module-relative offsets. Without
+        // this, PostHog fingerprints every launch's crash as a new issue.
+        bool haveLoadAddr = false;
+        unsigned long long loadAddr = 0;
+        unsigned long long moduleEnd = 0;
+        if (!report.loadAddress.empty()) {
+            try {
+                loadAddr = std::stoull(report.loadAddress, nullptr, 16);
+                haveLoadAddr = true;
+                if (!report.moduleSize.empty()) {
+                    unsigned long long modSize =
+                        std::stoull(report.moduleSize, nullptr, 16);
+                    if (modSize > 0) {
+                        moduleEnd = loadAddr + modSize;
+                    }
+                }
+            } catch (...) {
+                haveLoadAddr = false;
+            }
+        }
+
         json stacktrace;
         stacktrace["type"] = "raw";
         json framesList = json::array();
+
+        // Module-relative offsets that make up a stable crash fingerprint.
+        std::vector<std::string> fingerprintOffsets;
 
         std::istringstream ss(report.stacktrace);
         std::string line;
         while (std::getline(ss, line)) {
             if (line.find("0x") != std::string::npos) {
+                std::string normalized = haveLoadAddr
+                    ? CrashHandler::relativizeFrame(line, loadAddr, moduleEnd,
+                                                    &fingerprintOffsets)
+                    : line;
                 json f;
                 f["platform"] = "custom";
                 f["lang"] = "cpp";
-                f["function"] = line;
+                f["function"] = normalized;
                 f["in_app"] = true;
                 f["resolved"] = false;
                 framesList.push_back(f);
@@ -532,6 +562,20 @@ public:
         exceptionList.push_back(exception);
 
         props["$exception_list"] = exceptionList;
+
+        // Set an explicit fingerprint from the signal type plus the stable
+        // module-relative offsets, so the same crash groups into one issue
+        // across launches regardless of ASLR. Only set it when we actually
+        // normalized in-module frames; otherwise fall back to PostHog's default
+        // grouping rather than over-collapsing unrelated crashes.
+        if (!fingerprintOffsets.empty()) {
+            json fingerprint = json::array();
+            fingerprint.push_back(report.signalName);
+            for (const auto& offset : fingerprintOffsets) {
+                fingerprint.push_back(offset);
+            }
+            props["$exception_fingerprint"] = fingerprint;
+        }
         j["properties"] = props;
 
         QueuedItem req;

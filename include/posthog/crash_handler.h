@@ -30,7 +30,10 @@
 #include <ctime>
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
+#include <cctype>
 #include <deque>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -704,6 +707,72 @@ inline bool hasAddressesFromOurModule(const Report& report) {
     }
 
     return false;
+}
+
+/**
+ * @brief Rewrite a stacktrace line's absolute addresses into module-relative offsets.
+ * @details Crash frames are captured as absolute runtime addresses. On platforms with
+ *          ASLR (macOS/Linux) the module loads at a different base on every launch, so
+ *          the same crash produces different absolute addresses each time. PostHog error
+ *          tracking fingerprints on frame content, so without normalization every crash
+ *          groups as a brand-new issue.
+ *
+ *          Any hex address on the line that falls inside our module's range
+ *          [loadAddr, moduleEnd) is replaced with `<module>+0x<offset>`, which is
+ *          identical across launches and matches the offset expected by
+ *          scripts/symbolize.py. Addresses outside our module (system libraries) are
+ *          left untouched. In-module offsets are appended to @p outOffsets (if provided)
+ *          so callers can build a stable crash fingerprint.
+ *
+ * @param line The stacktrace line to normalize.
+ * @param loadAddr Module load (base) address.
+ * @param moduleEnd End of module range; 0 means unknown (treat any addr >= loadAddr as in-module).
+ * @param outOffsets Optional collector for the module-relative offset strings that were rewritten.
+ * @return The rewritten line.
+ */
+inline std::string relativizeFrame(const std::string& line,
+                                   unsigned long long loadAddr,
+                                   unsigned long long moduleEnd,
+                                   std::vector<std::string>* outOffsets = nullptr) {
+    std::string out;
+    out.reserve(line.size());
+    size_t i = 0;
+    while (i < line.size()) {
+        // Detect a hex literal: 0x followed by hex digits.
+        if (line[i] == '0' && i + 1 < line.size() &&
+            (line[i + 1] == 'x' || line[i + 1] == 'X')) {
+            size_t end = i + 2;
+            while (end < line.size() &&
+                   std::isxdigit(static_cast<unsigned char>(line[end]))) {
+                end++;
+            }
+            if (end > i + 2) {
+                bool rewritten = false;
+                try {
+                    unsigned long long addr =
+                        std::stoull(line.substr(i, end - i), nullptr, 16);
+                    if (addr >= loadAddr && (moduleEnd == 0 || addr < moduleEnd)) {
+                        unsigned long long offset = addr - loadAddr;
+                        char buf[32];
+                        std::snprintf(buf, sizeof(buf), "0x%llx", offset);
+                        out += "<module>+";
+                        out += buf;
+                        if (outOffsets) outOffsets->push_back(buf);
+                        rewritten = true;
+                    }
+                } catch (...) {
+                    // fall through and copy the literal verbatim
+                }
+                if (!rewritten) {
+                    out.append(line, i, end - i);
+                }
+                i = end;
+                continue;
+            }
+        }
+        out += line[i++];
+    }
+    return out;
 }
 
 /**

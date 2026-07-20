@@ -196,7 +196,10 @@ def parse_exception_list_data(data) -> dict:
     result = {
         "signal": exception.get("type", "Unknown"),
         "load_address": None,
-        "addresses": []
+        "addresses": [],
+        # True when frames already carry stable module-relative offsets
+        # ("<module>+0x...") rather than absolute runtime addresses.
+        "relative": False,
     }
 
     # Extract addresses from stacktrace frames
@@ -206,7 +209,15 @@ def parse_exception_list_data(data) -> dict:
     for frame in frames:
         # Try mangled_name first (PostHog format), then function
         func = frame.get("mangled_name", "") or frame.get("function", "")
-        # Extract address from function field (format: "  0x12345678" or "0x12345678")
+        # New format: "<module>+0x1234" is a module-relative offset that is
+        # stable across launches (ASLR-independent) and already load-address
+        # normalized, so it can be symbolized directly.
+        rel = re.search(r'<module>\+(0x[0-9a-fA-F]+)', func)
+        if rel:
+            result["addresses"].append(rel.group(1))
+            result["relative"] = True
+            continue
+        # Legacy format: bare absolute address (needs load address to offset).
         match = re.search(r'0x[0-9a-fA-F]+', func)
         if match:
             result["addresses"].append(match.group(0))
@@ -248,12 +259,20 @@ def parse_exception_list_clipboard() -> dict:
 
 def symbolize_crash(crash_data: dict, binary: str, load_addr_override: str = None):
     """Symbolize all addresses in crash data."""
-    load_addr = load_addr_override or crash_data.get("load_address")
+    # When frames are already module-relative offsets we must NOT subtract a
+    # load address again — they are symbolized directly against the binary.
+    if crash_data.get("relative"):
+        load_addr = None
+    else:
+        load_addr = load_addr_override or crash_data.get("load_address")
 
     print(f"Signal: {crash_data.get('signal', 'Unknown')}")
     if crash_data.get("timestamp"):
         print(f"Time: {crash_data['timestamp']}")
-    print(f"Load Address: {load_addr or 'Unknown'}")
+    if crash_data.get("relative"):
+        print("Load Address: (frames are module-relative offsets)")
+    else:
+        print(f"Load Address: {load_addr or 'Unknown'}")
     print(f"Binary: {binary}")
     print()
     print("Symbolized Stacktrace:")

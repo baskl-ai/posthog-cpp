@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.7.2] - 2026-07-20
+
+### Fixed
+- Crash reports now group correctly in PostHog Error Tracking. Frame addresses inside the
+  module are normalized to stable, ASLR-independent module-relative offsets (`<module>+0x…`)
+  and an explicit `$exception_fingerprint` is set, so the same crash dedupes into one issue
+  instead of spawning a new issue on every launch
+- `scripts/symbolize.py` recognizes the module-relative offset format and symbolizes it
+  directly (no load address needed); legacy absolute-address events still work
+
 ## [1.7.1] - 2026-02-27
 
 ### Changed
