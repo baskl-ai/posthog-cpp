@@ -379,6 +379,44 @@ TEST(crash_filter_no_module_size) {
     CHECK(PostHog::CrashHandler::hasAddressesFromOurModule(report) == true);
 }
 
+TEST(relativize_frame_in_module) {
+    // Address inside module range becomes a stable module-relative offset.
+    std::vector<std::string> offsets;
+    std::string out = PostHog::CrashHandler::relativizeFrame(
+        "  0x100050000", 0x100000000ULL, 0x100100000ULL, &offsets);
+    CHECK(out == "  <module>+0x50000");
+    CHECK(offsets.size() == 1);
+    CHECK(offsets[0] == "0x50000");
+}
+
+TEST(relativize_frame_out_of_module) {
+    // System-library address outside our module is left untouched.
+    std::vector<std::string> offsets;
+    std::string out = PostHog::CrashHandler::relativizeFrame(
+        "  0x18bc93584", 0x100000000ULL, 0x100100000ULL, &offsets);
+    CHECK(out == "  0x18bc93584");
+    CHECK(offsets.empty());
+}
+
+TEST(relativize_frame_unknown_module_size) {
+    // moduleEnd == 0 means unknown size: any addr >= loadAddr is in-module.
+    std::vector<std::string> offsets;
+    std::string out = PostHog::CrashHandler::relativizeFrame(
+        "0x100000abc", 0x100000000ULL, 0, &offsets);
+    CHECK(out == "<module>+0xabc");
+    CHECK(offsets.size() == 1);
+}
+
+TEST(relativize_frame_stable_across_aslr) {
+    // The same crash at two different load addresses must yield identical
+    // offsets, so PostHog fingerprints them into a single issue.
+    std::vector<std::string> a, b;
+    PostHog::CrashHandler::relativizeFrame("0x100050000", 0x100000000ULL, 0x100100000ULL, &a);
+    PostHog::CrashHandler::relativizeFrame("0x200050000", 0x200000000ULL, 0x200100000ULL, &b);
+    CHECK(a == b);
+    CHECK(a[0] == "0x50000");
+}
+
 int main() {
     std::cout << "=== PostHog Unit Tests ===" << std::endl;
 
@@ -396,6 +434,10 @@ int main() {
     RUN_TEST(crash_filter_no_module_addresses);
     RUN_TEST(crash_filter_no_load_address);
     RUN_TEST(crash_filter_no_module_size);
+    RUN_TEST(relativize_frame_in_module);
+    RUN_TEST(relativize_frame_out_of_module);
+    RUN_TEST(relativize_frame_unknown_module_size);
+    RUN_TEST(relativize_frame_stable_across_aslr);
     RUN_TEST(optout_file_disables);
     RUN_TEST(no_optout_file_enables);
     RUN_TEST(config_enabled_false_disables);
