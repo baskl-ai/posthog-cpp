@@ -309,7 +309,9 @@ public:
             if (frame.lineno > 0) f["lineno"] = frame.lineno;
             if (!frame.module.empty()) f["module"] = frame.module;
             f["in_app"] = frame.inApp;
-            f["resolved"] = true;
+            // Address-only fallback frames ("<module>+0x…") are not resolved, so PostHog
+            // keeps trying to symbolify them instead of treating them as final.
+            f["resolved"] = frame.resolved;
             framesList.push_back(f);
         }
 
