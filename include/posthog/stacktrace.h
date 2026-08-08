@@ -34,12 +34,13 @@ namespace Stacktrace {
  * @brief Structured stack frame for $exception format
  */
 struct Frame {
-    std::string function;    ///< Function name (required)
+    std::string function;    ///< Function name, or "<module>+0x<offset>" when no symbol is available
     std::string filename;    ///< Source file (optional)
     std::string module;      ///< Module name (optional)
     int lineno = 0;          ///< Line number (optional)
     int colno = 0;           ///< Column number (optional)
     bool inApp = true;       ///< Is this frame from app code
+    bool resolved = false;   ///< True when function is a real symbol name, false for a raw offset
 };
 
 /**
@@ -199,42 +200,38 @@ inline std::vector<Frame> captureStructured(int maxFrames = 32, int skip = 1,
 
 #if defined(_WIN32)
     HANDLE process = GetCurrentProcess();
-    HANDLE thread = GetCurrentThread();
 
     SymInitialize(process, NULL, TRUE);
     SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);
 
-    CONTEXT context;
-    RtlCaptureContext(&context);
+    // CaptureStackBackTrace walks the stack without a frame pointer, so it
+    // returns many frames on x64 where seeding STACKFRAME64.AddrFrame from Rbp
+    // used to stop after one or two.
+    std::vector<void*> buffer(maxFrames);
+    USHORT captured = CaptureStackBackTrace(skip, static_cast<DWORD>(maxFrames),
+                                            buffer.data(), NULL);
 
-    STACKFRAME64 frame = {};
-#ifdef _M_X64
-    frame.AddrPC.Offset = context.Rip;
-    frame.AddrPC.Mode = AddrModeFlat;
-    frame.AddrFrame.Offset = context.Rbp;
-    frame.AddrFrame.Mode = AddrModeFlat;
-    frame.AddrStack.Offset = context.Rsp;
-    frame.AddrStack.Mode = AddrModeFlat;
-    DWORD machineType = IMAGE_FILE_MACHINE_AMD64;
-#else
-    frame.AddrPC.Offset = context.Eip;
-    frame.AddrPC.Mode = AddrModeFlat;
-    frame.AddrFrame.Offset = context.Ebp;
-    frame.AddrFrame.Mode = AddrModeFlat;
-    frame.AddrStack.Offset = context.Esp;
-    frame.AddrStack.Mode = AddrModeFlat;
-    DWORD machineType = IMAGE_FILE_MACHINE_I386;
-#endif
-
-    int frameIndex = 0;
-
-    while (StackWalk64(machineType, process, thread, &frame, &context,
-                       NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL)) {
-        if (frameIndex++ < skip) continue;
-        if ((int)frames.size() >= maxFrames) break;
-
+    for (USHORT i = 0; i < captured; i++) {
         Frame sf;
-        DWORD64 address = frame.AddrPC.Offset;
+        DWORD64 address = reinterpret_cast<DWORD64>(buffer[i]);
+
+        // Resolve the module base and name from the address. The module base
+        // lets us turn an ASLR-slid absolute address into a stable
+        // module-relative offset when no symbol is available.
+        DWORD64 moduleBase = 0;
+        HMODULE hModule = NULL;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(buffer[i]), &hModule) && hModule) {
+            moduleBase = reinterpret_cast<DWORD64>(hModule);
+            char fullPath[MAX_PATH];
+            if (GetModuleFileNameA(hModule, fullPath, MAX_PATH)) {
+                std::string path = fullPath;
+                size_t lastSlash = path.find_last_of("\\/");
+                sf.module = (lastSlash != std::string::npos) ? path.substr(lastSlash + 1) : path;
+            }
+        }
+
         char symbolBuffer[sizeof(SYMBOL_INFO) + MAX_SYM_NAME * sizeof(TCHAR)];
         PSYMBOL_INFO symbol = (PSYMBOL_INFO)symbolBuffer;
         symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
@@ -243,6 +240,7 @@ inline std::vector<Frame> captureStructured(int maxFrames = 32, int skip = 1,
         DWORD64 displacement = 0;
         if (SymFromAddr(process, address, &displacement, symbol)) {
             sf.function = symbol->Name;
+            sf.resolved = true;
 
             IMAGEHLP_LINE64 line = {};
             line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
@@ -252,6 +250,12 @@ inline std::vector<Frame> captureStructured(int maxFrames = 32, int skip = 1,
                 sf.filename = line.FileName;
                 sf.lineno = line.LineNumber;
             }
+        } else if (moduleBase) {
+            // No symbol (plugins ship without PDBs). Emit a stable, ASLR-independent
+            // module-relative offset instead of the absolute runtime address.
+            std::ostringstream oss;
+            oss << "<module>+0x" << std::hex << (address - moduleBase);
+            sf.function = oss.str();
         } else {
             std::ostringstream oss;
             oss << "0x" << std::hex << address;
@@ -260,7 +264,8 @@ inline std::vector<Frame> captureStructured(int maxFrames = 32, int skip = 1,
 
         // Determine if this is app code
         if (!appIdentifier.empty()) {
-            sf.inApp = (sf.filename.find(appIdentifier) != std::string::npos ||
+            sf.inApp = (sf.module.find(appIdentifier) != std::string::npos ||
+                        sf.filename.find(appIdentifier) != std::string::npos ||
                         sf.function.find(appIdentifier) != std::string::npos);
         }
 
@@ -282,6 +287,14 @@ inline std::vector<Frame> captureStructured(int maxFrames = 32, int skip = 1,
         Dl_info info;
 
         if (dladdr(buffer[i], &info)) {
+            if (info.dli_fname) {
+                sf.filename = info.dli_fname;
+                size_t lastSlash = sf.filename.find_last_of('/');
+                if (lastSlash != std::string::npos) {
+                    sf.module = sf.filename.substr(lastSlash + 1);
+                }
+            }
+
             if (info.dli_sname) {
                 int status = 0;
                 char* demangled = abi::__cxa_demangle(info.dli_sname, nullptr, nullptr, &status);
@@ -291,16 +304,19 @@ inline std::vector<Frame> captureStructured(int maxFrames = 32, int skip = 1,
                 } else {
                     sf.function = info.dli_sname;
                 }
+                sf.resolved = true;
+            } else if (info.dli_fbase) {
+                // No symbol. Emit a stable, ASLR-independent module-relative offset
+                // instead of the absolute runtime address.
+                uintptr_t offset = reinterpret_cast<uintptr_t>(buffer[i]) -
+                                   reinterpret_cast<uintptr_t>(info.dli_fbase);
+                std::ostringstream oss;
+                oss << "<module>+0x" << std::hex << offset;
+                sf.function = oss.str();
             } else {
-                sf.function = "(unknown)";
-            }
-
-            if (info.dli_fname) {
-                sf.filename = info.dli_fname;
-                size_t lastSlash = sf.filename.find_last_of('/');
-                if (lastSlash != std::string::npos) {
-                    sf.module = sf.filename.substr(lastSlash + 1);
-                }
+                std::ostringstream oss;
+                oss << "0x" << std::hex << reinterpret_cast<uintptr_t>(buffer[i]);
+                sf.function = oss.str();
             }
 
             // Determine if this is app code

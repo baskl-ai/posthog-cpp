@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.7.3] - 2026-08-08
+
+### Fixed
+- Handled exceptions from `trackException()` now group correctly in PostHog Error Tracking.
+  When no symbols are available (plugins ship without PDBs), `captureStructured()` emitted the
+  absolute runtime address as the frame's function name. ASLR moves that address on every
+  launch and machine, so the same error opened a new issue each time. Frames without a symbol
+  now carry a stable, ASLR-independent module-relative offset (`<module>+0x…`) plus the module
+  name, and are marked `resolved = false` so PostHog still symbolifies them
+- Windows stack capture uses `CaptureStackBackTrace()` instead of seeding `STACKFRAME64.AddrFrame`
+  from `Rbp` (not a frame pointer on x64), which returned only one or two frames
+
 ## [1.7.1] - 2026-02-27
 
 ### Changed

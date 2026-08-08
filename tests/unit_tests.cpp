@@ -56,6 +56,25 @@ TEST(stacktrace_structured) {
     CHECK(!frames[0].function.empty());
 }
 
+TEST(stacktrace_offset_frames_not_resolved) {
+    // A frame that carries an address instead of a symbol must report
+    // resolved == false, so PostHog keeps trying to symbolify it and does not
+    // fingerprint on the ASLR-slid address as if it were the final name.
+    auto frames = PostHog::Stacktrace::captureStructured(20, 0);
+    for (const auto& f : frames) {
+        bool isOffset = f.function.rfind("<module>+0x", 0) == 0;
+        bool isBareAddr = f.function.rfind("0x", 0) == 0;
+        if (isOffset || isBareAddr) {
+            CHECK(f.resolved == false);
+        }
+        if (f.resolved) {
+            // Resolved frames hold a real symbol name, never a raw address.
+            CHECK(!isOffset);
+            CHECK(!isBareAddr);
+        }
+    }
+}
+
 TEST(client_init_without_apikey) {
     PostHog::Config config;
     config.apiKey = "";  // Empty API key
@@ -386,6 +405,7 @@ int main() {
     RUN_TEST(machine_id_algorithm);
     RUN_TEST(stacktrace_capture);
     RUN_TEST(stacktrace_structured);
+    RUN_TEST(stacktrace_offset_frames_not_resolved);
     RUN_TEST(client_init_without_apikey);
     RUN_TEST(client_distinct_id);
     RUN_TEST(client_enable_disable);
