@@ -30,6 +30,7 @@
 #include <ctime>
 #include <cstring>
 #include <cstdlib>
+#include <csignal>
 #include <deque>
 
 #ifdef _WIN32
@@ -64,6 +65,7 @@ struct Report {
     std::string faultAddress;    ///< Address that caused the crash (if available)
     std::string timestamp;       ///< When crash occurred (unix timestamp)
     std::string stacktrace;      ///< Raw stacktrace
+    std::string message;         ///< Exception message (uncaught C++ exception via std::terminate)
     std::string platform;        ///< OS info
     std::string loadAddress;     ///< Load address for symbolication
     std::string moduleSize;      ///< Size of our module (for address range filtering)
@@ -91,6 +93,10 @@ namespace Internal {
     static char g_crashFilePath[512] = {0};
     static char g_crashBuffer[8192] = {0};
     static bool g_installed = false;
+    // Set by the std::terminate hook right before it calls std::abort(). It tells the
+    // SIGABRT handler that a full TERMINATE record (with the exception message) is
+    // already on disk, so the handler must not truncate and overwrite it.
+    static volatile std::sig_atomic_t g_terminateHandled = 0;
     static unsigned long g_loadAddress = 0;
     static unsigned long g_moduleSize = 0;  // Size of our module for address filtering
     static char g_execPath[512] = {0};
@@ -171,6 +177,16 @@ namespace Internal {
 #ifndef _WIN32
     inline void signalHandlerWithInfo(int sig, siginfo_t* info, void* ucontext) {
         (void)ucontext;  // Unused for now
+
+        // An uncaught C++ exception routes through std::terminate, which already wrote
+        // a full TERMINATE record (with the exception message) before calling
+        // std::abort(). Do not overwrite that record with a message-less SIGABRT one.
+        if (sig == SIGABRT && g_terminateHandled) {
+            signal(sig, SIG_DFL);
+            raise(sig);
+            return;
+        }
+
         char* ptr = g_crashBuffer;
         size_t remaining = sizeof(g_crashBuffer);
 
@@ -290,6 +306,12 @@ namespace Internal {
 
 #ifdef _WIN32
     inline LONG WINAPI exceptionFilter(EXCEPTION_POINTERS* exceptionInfo) {
+        // The std::terminate hook already wrote a full TERMINATE record with the
+        // exception message. Keep it instead of overwriting with the abort exception.
+        if (g_terminateHandled) {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
         char* ptr = g_crashBuffer;
         size_t remaining = sizeof(g_crashBuffer);
 
@@ -620,17 +642,36 @@ inline bool install(const std::string& crashDir) {
             msg = "Unknown exception";
         }
 
-        std::ofstream f(Internal::g_crashFilePath);
+        // Collapse the message to a single line so it stays one MESSAGE record.
+        std::string safeMsg = msg;
+        for (char& c : safeMsg) {
+            if (c == '\n' || c == '\r') c = ' ';
+        }
+
+        std::ofstream f(Internal::g_crashFilePath, std::ios::trunc);
         if (f.is_open()) {
             f << "SIGNAL: TERMINATE\n";
             f << "TIME: " << time(nullptr) << "\n";
             f << "LOAD_ADDR: 0x" << std::hex << Internal::g_loadAddress << "\n";
-            f << "MODULE_SIZE: 0x" << std::hex << Internal::g_moduleSize << "\n";
+            f << "MODULE_SIZE: 0x" << std::hex << Internal::g_moduleSize << std::dec << "\n";
             f << "EXEC_PATH: " << Internal::g_execPath << "\n";
-            f << "MESSAGE: " << msg << "\n";
+            f << "MESSAGE: " << safeMsg << "\n";
+#ifndef _WIN32
+            // The terminate hook runs in normal context, so backtrace() is safe here.
+            // Capturing frames now means the SIGABRT handler no longer needs to write.
+            void* frames[32];
+            int frameCount = backtrace(frames, 32);
+            f << "STACKTRACE:\n";
+            for (int i = 0; i < frameCount; i++) {
+                f << "  0x" << std::hex << reinterpret_cast<unsigned long>(frames[i]) << std::dec << "\n";
+            }
+#endif
             f.close();
         }
 
+        // Mark the record as authoritative before abort() raises SIGABRT, so the
+        // signal handler skips its truncating write.
+        Internal::g_terminateHandled = 1;
         std::abort();
     });
 
@@ -743,7 +784,7 @@ inline std::optional<Report> loadPendingReport() {
             report.execPath = line.substr(11);
             inStacktrace = false;
         } else if (line.rfind("MESSAGE: ", 0) == 0) {
-            report.stacktrace = line.substr(9);
+            report.message = line.substr(9);
             inStacktrace = false;
         } else if (line == "STACKTRACE:") {
             inStacktrace = true;
