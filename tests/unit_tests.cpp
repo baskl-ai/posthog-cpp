@@ -13,6 +13,11 @@
 #include <fstream>
 #include <cstdio>
 #include <cstdlib>
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <stdexcept>
+#include <iterator>
+#endif
 
 #define TEST(name) void test_##name()
 #define RUN_TEST(name) do { \
@@ -379,6 +384,48 @@ TEST(crash_filter_no_module_size) {
     CHECK(PostHog::CrashHandler::hasAddressesFromOurModule(report) == true);
 }
 
+// Regression test for the SIGABRT handler truncating the terminate record.
+// An uncaught C++ exception must land as a TERMINATE record that keeps its message,
+// not as a blank "Aborted" SIGABRT record.
+TEST(terminate_message_survives_abort) {
+#ifndef _WIN32
+    std::string dir = "/tmp/posthog_terminate_e2e";
+    std::string path = dir + "/pending_crash.txt";
+    std::remove(path.c_str());
+
+    pid_t pid = fork();
+    CHECK(pid >= 0);
+    if (pid == 0) {
+        // Child: install handlers, then throw an uncaught exception.
+        PostHog::CrashHandler::install(dir);
+        throw std::runtime_error("uncaught_boom_marker");
+    }
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    CHECK(WIFSIGNALED(status));
+    CHECK(WTERMSIG(status) == SIGABRT);
+
+    // The record on disk must still be the TERMINATE one, not overwritten by SIGABRT.
+    std::ifstream raw(path);
+    CHECK(raw.is_open());
+    std::string content((std::istreambuf_iterator<char>(raw)),
+                        std::istreambuf_iterator<char>());
+    raw.close();
+    CHECK(content.find("SIGNAL: TERMINATE") != std::string::npos);
+    CHECK(content.find("SIGNAL: SIGABRT") == std::string::npos);
+    CHECK(content.find("uncaught_boom_marker") != std::string::npos);
+
+    // The parser exposes the message in its own field.
+    PostHog::CrashHandler::install(dir);  // first install in this process; sets the path
+    auto report = PostHog::CrashHandler::loadPendingReport();
+    CHECK(report.has_value());
+    CHECK(report->signalName == "TERMINATE");
+    CHECK(report->message == "uncaught_boom_marker");
+    PostHog::CrashHandler::clearPendingReport();
+#endif
+}
+
 int main() {
     std::cout << "=== PostHog Unit Tests ===" << std::endl;
 
@@ -396,6 +443,7 @@ int main() {
     RUN_TEST(crash_filter_no_module_addresses);
     RUN_TEST(crash_filter_no_load_address);
     RUN_TEST(crash_filter_no_module_size);
+    RUN_TEST(terminate_message_survives_abort);
     RUN_TEST(optout_file_disables);
     RUN_TEST(no_optout_file_enables);
     RUN_TEST(config_enabled_false_disables);

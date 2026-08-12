@@ -426,8 +426,13 @@ public:
                     description += " (invalid permissions for mapped object)";
                 }
             }
+        } else if (report.signalName == "TERMINATE") {
+            // Uncaught C++ exception. The message is the exception's what() text.
+            description = report.message.empty() ? "Unhandled C++ exception" : report.message;
         } else if (report.signalName == "SIGABRT") {
-            description = "Aborted";
+            // A genuine abort() keeps the "Aborted" label; if a terminate message
+            // survived, surface it so the issue names the exception.
+            description = report.message.empty() ? "Aborted" : report.message;
         } else if (report.signalName == "SIGBUS") {
             description = "Bus Error";
             if (!report.faultAddress.empty()) {

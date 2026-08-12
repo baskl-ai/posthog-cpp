@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.7.2] - 2026-08-12
+
+### Fixed
+- Uncaught C++ exceptions no longer collapse into one blank "SIGABRT: Aborted" issue. The `std::terminate` hook wrote a `TERMINATE` record with the exception message, but the SIGABRT handler then truncated the same file and overwrote it with an address-only record. The handler now detects the terminate record and keeps it, so error tracking shows the exception type and message.
+- The `TERMINATE` record now carries a stack trace, captured in the terminate hook where `backtrace()` is safe.
+
 ## [1.7.1] - 2026-02-27
 
 ### Changed
