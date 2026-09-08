@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.7.2] - 2026-09-08
+
+### Fixed
+- Windows crash reports were corrupted when the exception filter ran twice. A fault inside the handler rewound the shared buffer and mixed a second report into the first, so the stack text could not be symbolicated.
+- The filter now sets a re-entry guard on entry. A second entry returns at once and leaves the first report intact.
+- The filter no longer calls `malloc`, `sprintf`, or DbgHelp while the process faults. These calls are not safe in that state and could make the handler crash inside itself. The filter now writes raw addresses with the same async-safe helpers as the Unix path.
+- Resolve Windows crash addresses to function names offline with `scripts/symbolize.py`, the same way as before for Unix crashes.
+
 ## [1.7.1] - 2026-02-27
 
 ### Changed
