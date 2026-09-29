@@ -310,11 +310,23 @@ namespace Internal {
 #endif
 
 #ifdef _WIN32
+    static LPTOP_LEVEL_EXCEPTION_FILTER g_previousExceptionFilter = nullptr;
+
     inline LONG WINAPI exceptionFilter(EXCEPTION_POINTERS* exceptionInfo) {
         // The std::terminate hook already wrote a full TERMINATE record with the
         // exception message. Keep it instead of overwriting with the abort exception.
         if (g_terminateHandled.load(std::memory_order_relaxed)) {
             return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        // The MSVC runtime's filter routes uncaught C++ exceptions through
+        // std::terminate with current_exception() populated. Replacing that
+        // filter without chaining it bypasses our message capture entirely.
+        // Other native faults, or a missing previous filter, use our raw report.
+        constexpr DWORD msvcExceptionCode = 0xe06d7363;
+        if (exceptionInfo->ExceptionRecord->ExceptionCode == msvcExceptionCode &&
+            g_previousExceptionFilter) {
+            return g_previousExceptionFilter(exceptionInfo);
         }
 
         char* ptr = g_crashBuffer;
@@ -621,7 +633,10 @@ inline bool install(const std::string& crashDir) {
     Internal::safeCopy(Internal::g_crashFilePath, crashFile.c_str(), sizeof(Internal::g_crashFilePath));
 
 #ifdef _WIN32
-    SetUnhandledExceptionFilter(Internal::exceptionFilter);
+    auto previousFilter = SetUnhandledExceptionFilter(Internal::exceptionFilter);
+    if (previousFilter != Internal::exceptionFilter) {
+        Internal::g_previousExceptionFilter = previousFilter;
+    }
 #else
     struct sigaction sa;
     sa.sa_sigaction = Internal::signalHandlerWithInfo;

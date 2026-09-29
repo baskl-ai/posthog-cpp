@@ -40,8 +40,8 @@
 
 #define POSTHOG_VERSION_MAJOR 1
 #define POSTHOG_VERSION_MINOR 7
-#define POSTHOG_VERSION_PATCH 4
-#define POSTHOG_VERSION "1.7.4"
+#define POSTHOG_VERSION_PATCH 5
+#define POSTHOG_VERSION "1.7.5"
 
 #include <string>
 #include <map>

@@ -38,9 +38,10 @@ int main(int argc, char** argv) {
     if (mode == "verify") {
         auto report = PostHog::CrashHandler::loadPendingReport();
         check(report.has_value(), "missing report on next launch");
-        check(report->signalName == (scenario == "abort" ? "SIGABRT" : "TERMINATE"),
+        const bool native = scenario == "native" || scenario == "no_filter";
+        check(report->signalName == (native ? "EXCEPTION" : scenario == "abort" ? "SIGABRT" : "TERMINATE"),
               "wrong signal: terminate record overwritten or direct abort suppressed");
-        check(report->message == (scenario == "abort" ? "" : expectedMessage(scenario)),
+        check(report->message == (native || scenario == "abort" ? "" : expectedMessage(scenario)),
               "exception message lost or malformed");
         check(!nlohmann::json(report->message).dump().empty(), "message cannot serialize to JSON");
         check(report->stacktrace.find("0x") != std::string::npos, "missing native frames");
@@ -49,6 +50,11 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (mode != "crash") return 2;
+#ifdef _WIN32
+    SetErrorMode(SEM_NOGPFAULTERRORBOX);
+    if (scenario == "native") RaiseException(EXCEPTION_ILLEGAL_INSTRUCTION, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    if (scenario == "no_filter") PostHog::CrashHandler::Internal::g_previousExceptionFilter = nullptr;
+#endif
 #ifdef _MSC_VER
     // Keep intentional crashes unattended on Windows CI.
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);

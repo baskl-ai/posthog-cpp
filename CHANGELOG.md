@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.7.5] - 2026-09-29
+
+### Fixed
+- Chain the previous Windows exception filter for MSVC C++ exceptions, allowing the runtime to invoke the terminate hook with the active exception. Previously installing our filter bypassed that hook for uncaught throws.
+- Keep native exception reporting when no previous Windows filter exists; cover both that fallback and ordinary native faults in subprocess tests.
+
 ## [1.7.4] - 2026-09-29
 
 ### Fixed
