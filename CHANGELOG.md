@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.7.3] - 2026-09-29
+
+### Fixed
+- Preserve full-width Windows instruction, stack, and module addresses when writing raw crash reports.
+- Save the exception code and faulting instruction before best-effort stack capture, then append frames without truncating the fallback report.
+- Keep the crash buffer and re-entry guard shared across translation units; recursive and competing filter entries leave the first report alone.
+- Retain a Windows fallback report when its faulting instruction belongs to our module, even if stack capture fails.
+- Use bounded formatting and the Windows clock API in the exception filter, without heap allocation, CRT formatting, or DbgHelp lookups.
+
+### Tests
+- Add Windows regression coverage for full-width report parsing, nested and concurrent entry, cross-translation-unit state, interrupted stack capture, and an actual unhandled exception.
+- Run CI for pull requests and main pushes as well as tags and manual runs.
+
 ## [1.7.2] - 2026-09-08
 
 ### Fixed
