@@ -8,6 +8,7 @@
 #include <posthog/stacktrace.h>
 #include <posthog/crash_handler.h>
 #include <posthog/logging.h>
+#include "../src/exception_frames.h"
 #include <iostream>
 #include <cassert>
 #include <fstream>
@@ -54,6 +55,55 @@ TEST(stacktrace_structured) {
     auto frames = PostHog::Stacktrace::captureStructured(10, 0);
     CHECK(!frames.empty());
     CHECK(!frames[0].function.empty());
+}
+
+TEST(stacktrace_offset_frames_not_resolved) {
+    auto frames = PostHog::Stacktrace::captureStructured(20, 0);
+    CHECK(!frames.empty());
+    for (const auto& f : frames) {
+        CHECK(f.function.rfind("0x", 0) != 0);
+        if (f.function.rfind("<module>+0x", 0) == 0 || f.function == "(unknown)") {
+            CHECK(!f.resolved);
+        }
+    }
+}
+
+TEST(stacktrace_stable_wire_frames) {
+    using PostHog::Stacktrace::detail::unresolvedFrame;
+    using PostHog::detail::exceptionFrames;
+    auto a = unresolvedFrame(0x101234, 0x100000, "/install/a/plugin.so");
+    auto b = unresolvedFrame(0x701234, 0x700000, "/install/b/plugin.so");
+    CHECK(a.function == "<module>+0x1234");
+    CHECK(a.module == "plugin.so");
+    CHECK(exceptionFrames({a}) == exceptionFrames({b}));
+    CHECK(exceptionFrames({a})[0]["resolved"] == false);
+    CHECK(exceptionFrames({a}) != exceptionFrames({
+        unresolvedFrame(0x701235, 0x700000, "/install/b/plugin.so")}));
+    CHECK(exceptionFrames({a}) != exceptionFrames({
+        unresolvedFrame(0x701234, 0x700000, "/install/b/other.so")}));
+    CHECK(unresolvedFrame(0x1234, 0x1000, "C:\\plugins\\plugin.dll").module == "plugin.dll");
+    CHECK(unresolvedFrame(0x1234, 0x1000, "plugin.so").module == "plugin.so");
+    auto unknown = unresolvedFrame(0x1234, 0, "");
+    CHECK(unknown.function == "(unknown)");
+    CHECK(exceptionFrames({unknown}) == exceptionFrames({unresolvedFrame(0x9876, 0, "")}));
+    CHECK(unresolvedFrame(0x1234, 0x2000, "").function == "(unknown)");
+    a.function = "actual_function";
+    a.resolved = true;
+    a.filename = "source.cpp";
+    a.lineno = 42;
+    const auto resolved = exceptionFrames({a})[0];
+    CHECK(resolved["resolved"] == true);
+    CHECK(resolved["function"] == "actual_function");
+    CHECK(resolved["filename"] == "source.cpp");
+    CHECK(resolved["lineno"] == 42);
+}
+
+TEST(stacktrace_invalid_limits) {
+    CHECK(PostHog::Stacktrace::captureStructured(0).empty());
+    CHECK(PostHog::Stacktrace::captureStructured(-1).empty());
+    CHECK(PostHog::Stacktrace::captureStructured(1, -1).empty());
+    CHECK(PostHog::Stacktrace::captureStructured(1, (std::numeric_limits<int>::max)()).empty());
+    CHECK(PostHog::Stacktrace::captureStructured(1, 0).size() == 1);
 }
 
 TEST(client_init_without_apikey) {
@@ -386,6 +436,9 @@ int main() {
     RUN_TEST(machine_id_algorithm);
     RUN_TEST(stacktrace_capture);
     RUN_TEST(stacktrace_structured);
+    RUN_TEST(stacktrace_offset_frames_not_resolved);
+    RUN_TEST(stacktrace_stable_wire_frames);
+    RUN_TEST(stacktrace_invalid_limits);
     RUN_TEST(client_init_without_apikey);
     RUN_TEST(client_distinct_id);
     RUN_TEST(client_enable_disable);

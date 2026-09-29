@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.7.5] - 2026-09-29
+
+### Fixed
+- Retain the Windows crash-handler fixes and regression tests merged separately in 1.7.3.
+- Use Windows platform unwinding for structured handled-exception stacks; preserve
+  stable module-relative offsets and truthful resolution flags from 1.7.4.
+- Strip the optimized regression fixture explicitly on Unix platforms so macOS
+  local symbols cannot bypass the address-only path under test.
+- Reconcile the original PR's provisional 1.7.3 notes with the released crash-fix
+  history; this SDK does not enable PostHog native symbolication for custom frames.
+
+## [1.7.4] - 2026-09-29
+
+### Fixed
+- Complete handled-exception ASLR normalization: unresolved frames use module-relative
+  offsets, unknown-module frames use a stable placeholder, and binary paths use
+  basenames so installation directories do not change grouping.
+- Preserve real resolution flags in the exception payload. Custom frames are passed
+  through by PostHog; this does not enable native server-side symbolication.
+- Validate frame capture limits and safely handle long Windows module paths.
+- Add deterministic relocation/payload tests and optimized symbol-free capture tests
+  across processes, installation directories, and distinct call sites.
+- Synchronize the CMake package version with the SDK header.
+
 ## [1.7.3] - 2026-09-29
 
 ### Fixed

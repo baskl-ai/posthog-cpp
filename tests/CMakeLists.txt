@@ -25,6 +25,33 @@ target_link_libraries(crash PRIVATE posthog)
 add_executable(logging_example ../examples/logging.cpp)
 target_link_libraries(logging_example PRIVATE posthog)
 
+# A release-like fixture: hidden functions, no PDBs, no inline/tail-call shortcuts.
+# It is copied without symbols and run from two installation paths by the test.
+add_executable(stacktrace_probe stacktrace_probe.cpp)
+target_link_libraries(stacktrace_probe PRIVATE posthog)
+set_target_properties(stacktrace_probe PROPERTIES CXX_VISIBILITY_PRESET hidden)
+if(MSVC)
+    target_compile_options(stacktrace_probe PRIVATE /O2)
+    target_link_options(stacktrace_probe PRIVATE /DEBUG:NONE)
+else()
+    target_compile_options(stacktrace_probe PRIVATE -O2 -g0)
+    set_target_properties(stacktrace_probe PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
+    cmake_policy(SET CMP0083 NEW)
+    include(CheckPIESupported)
+    check_pie_supported()
+    # Mach-O dladdr can resolve local nlist symbols even with hidden visibility.
+    # Strip the fixture explicitly so the offset fallback is actually exercised.
+    add_custom_command(TARGET stacktrace_probe POST_BUILD
+        COMMAND ${CMAKE_STRIP} $<TARGET_FILE:stacktrace_probe>)
+    if(APPLE)
+        add_custom_command(TARGET stacktrace_probe POST_BUILD
+            COMMAND codesign --force --sign - $<TARGET_FILE:stacktrace_probe>)
+    endif()
+endif()
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME stacktrace_stability COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_stacktrace_stability.py $<TARGET_FILE:stacktrace_probe>)
+
 if(WIN32)
     add_executable(windows_crash_tests windows_crash_tests.cpp windows_crash_other.cpp)
     target_include_directories(windows_crash_tests PRIVATE ../include)
