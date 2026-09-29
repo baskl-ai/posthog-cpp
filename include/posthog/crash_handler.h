@@ -31,6 +31,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <csignal>
+#include <atomic>
+#include <cstdint>
 #include <deque>
 
 #ifdef _WIN32
@@ -96,7 +98,10 @@ namespace Internal {
     // Set by the std::terminate hook right before it calls std::abort(). It tells the
     // SIGABRT handler that a full TERMINATE record (with the exception message) is
     // already on disk, so the handler must not truncate and overwrite it.
-    static volatile std::sig_atomic_t g_terminateHandled = 0;
+    // Lock-free atomics can be read in a signal handler and across crashing threads.
+    static_assert(std::atomic<bool>::is_always_lock_free,
+                  "Crash reporting requires lock-free bool atomics");
+    static std::atomic<bool> g_terminateHandled{false};
     static unsigned long g_loadAddress = 0;
     static unsigned long g_moduleSize = 0;  // Size of our module for address filtering
     static char g_execPath[512] = {0};
@@ -181,7 +186,7 @@ namespace Internal {
         // An uncaught C++ exception routes through std::terminate, which already wrote
         // a full TERMINATE record (with the exception message) before calling
         // std::abort(). Do not overwrite that record with a message-less SIGABRT one.
-        if (sig == SIGABRT && g_terminateHandled) {
+        if (sig == SIGABRT && g_terminateHandled.load(std::memory_order_relaxed)) {
             signal(sig, SIG_DFL);
             raise(sig);
             return;
@@ -308,7 +313,7 @@ namespace Internal {
     inline LONG WINAPI exceptionFilter(EXCEPTION_POINTERS* exceptionInfo) {
         // The std::terminate hook already wrote a full TERMINATE record with the
         // exception message. Keep it instead of overwriting with the abort exception.
-        if (g_terminateHandled) {
+        if (g_terminateHandled.load(std::memory_order_relaxed)) {
             return EXCEPTION_CONTINUE_SEARCH;
         }
 
@@ -631,47 +636,56 @@ inline bool install(const std::string& crashDir) {
 #endif
 
     std::set_terminate([]() {
-        const char* msg = "std::terminate called";
+        char msg[1024] = "std::terminate called";
         try {
             if (auto eptr = std::current_exception()) {
                 std::rethrow_exception(eptr);
             }
         } catch (const std::exception& e) {
-            msg = e.what();
+            // Copy while the exception is alive; avoid allocating another string
+            // when termination itself may have been caused by allocation failure.
+            Internal::safeCopy(msg, e.what(), sizeof(msg));
         } catch (...) {
-            msg = "Unknown exception";
+            Internal::safeCopy(msg, "Unknown exception", sizeof(msg));
         }
 
         // Collapse the message to a single line so it stays one MESSAGE record.
-        std::string safeMsg = msg;
-        for (char& c : safeMsg) {
+        for (char& c : msg) {
             if (c == '\n' || c == '\r') c = ' ';
         }
 
-        std::ofstream f(Internal::g_crashFilePath, std::ios::trunc);
-        if (f.is_open()) {
-            f << "SIGNAL: TERMINATE\n";
-            f << "TIME: " << time(nullptr) << "\n";
-            f << "LOAD_ADDR: 0x" << std::hex << Internal::g_loadAddress << "\n";
-            f << "MODULE_SIZE: 0x" << std::hex << Internal::g_moduleSize << std::dec << "\n";
-            f << "EXEC_PATH: " << Internal::g_execPath << "\n";
-            f << "MESSAGE: " << safeMsg << "\n";
-#ifndef _WIN32
-            // The terminate hook runs in normal context, so backtrace() is safe here.
-            // Capturing frames now means the SIGABRT handler no longer needs to write.
-            void* frames[32];
-            int frameCount = backtrace(frames, 32);
-            f << "STACKTRACE:\n";
-            for (int i = 0; i < frameCount; i++) {
-                f << "  0x" << std::hex << reinterpret_cast<unsigned long>(frames[i]) << std::dec << "\n";
-            }
+        try {
+            std::ofstream f(Internal::g_crashFilePath, std::ios::trunc);
+            if (f.is_open()) {
+                f << "SIGNAL: TERMINATE\n";
+                f << "TIME: " << time(nullptr) << "\n";
+                f << "LOAD_ADDR: 0x" << std::hex << Internal::g_loadAddress << "\n";
+                f << "MODULE_SIZE: 0x" << std::hex << Internal::g_moduleSize << std::dec << "\n";
+                f << "EXEC_PATH: " << Internal::g_execPath << "\n";
+                f << "MESSAGE: " << msg << "\n";
+                // Best-effort capture before abort(), on both supported platform paths.
+                // Termination may follow resource exhaustion; this is not guaranteed
+                // to succeed just because we are outside a signal handler.
+                void* frames[32];
+#ifdef _WIN32
+                int frameCount = CaptureStackBackTrace(0, 32, frames, nullptr);
+#else
+                int frameCount = backtrace(frames, 32);
 #endif
-            f.close();
+                f << "STACKTRACE:\n";
+                for (int i = 0; i < frameCount; i++) {
+                    f << "  0x" << std::hex << reinterpret_cast<std::uintptr_t>(frames[i]) << std::dec << "\n";
+                }
+                f.close();
+                // close() flushes buffered output and reports write/close failures.
+                // Preserve only a complete record; otherwise leave abort's fallback.
+                if (f.good()) {
+                    Internal::g_terminateHandled.store(true, std::memory_order_relaxed);
+                }
+            }
+        } catch (...) {
+            // Stream setup can allocate. Still reach abort's fallback if it fails.
         }
-
-        // Mark the record as authoritative before abort() raises SIGABRT, so the
-        // signal handler skips its truncating write.
-        Internal::g_terminateHandled = 1;
         std::abort();
     });
 

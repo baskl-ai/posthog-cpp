@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.7.3] - 2026-09-29
+
+### Fixed
+- Preserve terminate records only after the file closes successfully, retaining the abort fallback on open, write, or stream setup failure.
+- Capture raw terminate stack frames on Windows as well as Unix, using pointer-width addresses.
+- Bound and copy exception messages while the exception is alive; normalize line breaks without another allocation. The report exposes the message, not the dynamic C++ exception class.
+- Use a lock-free atomic preservation flag across signal and exception handlers.
+
+### Tests
+- Run isolated crash/next-launch regressions on Windows, macOS, and Linux, covering standard and unknown exceptions, explicit terminate, empty/long/multiline messages, and failed writes. Verify ordinary abort capture on Unix.
+
 ## [1.7.2] - 2026-08-12
 
 ### Fixed
