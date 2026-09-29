@@ -106,6 +106,23 @@ Based on `config.appName`:
 2. **Next launch** → `installCrashHandler()` detects the file and sends `$exception` event
 3. **PostHog** → shows crash in Error Tracking
 
+### Windows crash capture
+
+The Windows exception filter admits one writer per SDK module and saves the
+exception code, full-width instruction address, and module metadata before
+attempting stack capture. Recursive or competing entries return immediately;
+additional frames are appended without replacing that initial report. A fault
+inside stack capture can therefore leave a minimal report with just the original
+instruction address. Reports whose faulting instruction belongs to our module
+remain eligible for upload even without additional frames.
+
+The filter avoids heap allocation, CRT formatting, and DbgHelp symbol lookup.
+Capture is still best effort: invalid stacks, process corruption, or failed file
+I/O can prevent a complete report. Return addresses come from the handler thread,
+not an unwind of the supplied exception context. Offline symbolization requires
+the matching binary/debug symbols; this change does not add a minidump or fix
+unrelated crash grouping and symbolizer limitations.
+
 ### Symbolization
 
 Crash stack traces contain only memory addresses. To get function names and line numbers:

@@ -45,6 +45,10 @@ int main(int argc, char** argv) {
               "exception message lost or malformed");
         check(!nlohmann::json(report->message).dump().empty(), "message cannot serialize to JSON");
         check(report->stacktrace.find("0x") != std::string::npos, "missing native frames");
+        if (!native && scenario != "abort") {
+            check(PostHog::CrashHandler::hasAddressesFromOurModule(*report),
+                  "terminate report would be discarded by the module filter");
+        }
         check(report->timestamp.find_first_not_of("0123456789") == std::string::npos,
               "timestamp is not decimal");
         return 0;
