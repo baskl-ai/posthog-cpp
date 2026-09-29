@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.7.7] - 2026-09-29
+
+### Fixed
+- Check Windows native-writer re-entry before inspecting exception pointers or dispatching to the previous filter, preserving PR #11's recursive and concurrent entry protection.
+
 ## [1.7.6] - 2026-09-29
 
 ### Fixed

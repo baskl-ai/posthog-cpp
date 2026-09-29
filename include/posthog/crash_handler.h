@@ -412,7 +412,8 @@ namespace Internal {
     inline LONG WINAPI exceptionFilter(EXCEPTION_POINTERS* exceptionInfo) {
         // The std::terminate hook already wrote a full TERMINATE record with the
         // exception message. Keep it instead of overwriting with the abort exception.
-        if (g_terminateHandled.load(std::memory_order_relaxed)) {
+        if (g_terminateHandled.load(std::memory_order_relaxed) ||
+            InterlockedCompareExchange(&g_exceptionFilterEntered, 0, 0) != 0) {
             return EXCEPTION_CONTINUE_SEARCH;
         }
 
