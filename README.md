@@ -154,6 +154,21 @@ python scripts/symbolize.py \
 | **Line numbers**     | ❌ No               | ❌ No (needs symbolization) |
 | **Sent immediately** | ✅ Yes              | ❌ Next launch              |
 
+### Handled-exception grouping
+
+`trackException()` uses symbol names when available and `<module>+0x<offset>`
+with a module basename otherwise. Offsets are stable across ASLR relocations of
+**the same binary**, not necessarily across builds or different call paths.
+Frames with no module base use `(unknown)`; they cannot distinguish locations.
+On macOS/Linux, `dladdr` binary paths are reduced to basenames to avoid grouping
+by installation directory. Address-only frames have `resolved=false`.
+
+These are PostHog `custom` frames, which the server passes through; marking a
+frame unresolved does **not** enable native symbolication. Grouping still depends
+on PostHog's grouping algorithm, exception text, and any custom rules. This fixes
+unstable frame inputs, not historical issues or every source of grouping noise.
+The crash-reporting path is separate.
+
 ## Privacy and Opt-Out
 
 ### What data is collected
