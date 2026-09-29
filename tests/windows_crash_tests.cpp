@@ -136,6 +136,12 @@ int main(int argc, char** argv) {
     CHECK(GetTempPathA(MAX_PATH, temporary) > 0);
     const std::string directory = std::string(temporary) + "posthog-crash-" + std::to_string(GetCurrentProcessId());
     prepare(directory);
+    // A completed terminate record also takes priority, before filter dispatch
+    // inspects any exception pointers or claims the native writer.
+    Internal::g_terminateHandled.store(true, std::memory_order_relaxed);
+    CHECK(Internal::exceptionFilter(nullptr) == EXCEPTION_CONTINUE_SEARCH);
+    CHECK(Internal::g_exceptionFilterEntered == 0);
+    Internal::g_terminateHandled.store(false, std::memory_order_relaxed);
     invokeFilter();
     checkSyntheticReport(true);
     const std::string first = readReport();

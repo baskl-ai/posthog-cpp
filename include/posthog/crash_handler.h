@@ -30,6 +30,8 @@
 #include <ctime>
 #include <cstring>
 #include <cstdlib>
+#include <csignal>
+#include <atomic>
 #include <cstdint>
 #include <deque>
 
@@ -63,6 +65,7 @@ struct Report {
     std::string faultAddress;    ///< Address that caused the crash (if available)
     std::string timestamp;       ///< When crash occurred (unix timestamp)
     std::string stacktrace;      ///< Raw stacktrace
+    std::string message;         ///< Exception message (uncaught C++ exception via std::terminate)
     std::string platform;        ///< OS info
     std::string loadAddress;     ///< Load address for symbolication
     std::string moduleSize;      ///< Size of our module (for address range filtering)
@@ -93,6 +96,13 @@ namespace Internal {
     inline std::uintptr_t g_loadAddress = 0;
     inline std::size_t g_moduleSize = 0;  // Size of our module for address filtering
     inline char g_execPath[512] = {0};
+    // Set by the std::terminate hook right before it calls std::abort(). It tells the
+    // SIGABRT handler that a full TERMINATE record (with the exception message) is
+    // already on disk, so the handler must not truncate and overwrite it.
+    // Lock-free atomics can be read in a signal handler and across crashing threads.
+    static_assert(std::atomic<bool>::is_always_lock_free,
+                  "Crash reporting requires lock-free bool atomics");
+    inline std::atomic<bool> g_terminateHandled{false};
 
     inline void safeCopy(char* dest, const char* src, size_t maxLen) {
         size_t i = 0;
@@ -170,6 +180,16 @@ namespace Internal {
 #ifndef _WIN32
     inline void signalHandlerWithInfo(int sig, siginfo_t* info, void* ucontext) {
         (void)ucontext;  // Unused for now
+
+        // An uncaught C++ exception routes through std::terminate, which already wrote
+        // a full TERMINATE record (with the exception message) before calling
+        // std::abort(). Do not overwrite that record with a message-less SIGABRT one.
+        if (sig == SIGABRT && g_terminateHandled.load(std::memory_order_relaxed)) {
+            signal(sig, SIG_DFL);
+            raise(sig);
+            return;
+        }
+
         char* ptr = g_crashBuffer;
         size_t remaining = sizeof(g_crashBuffer);
 
@@ -288,6 +308,8 @@ namespace Internal {
 #endif
 
 #ifdef _WIN32
+    inline LPTOP_LEVEL_EXCEPTION_FILTER g_previousExceptionFilter = nullptr;
+
     // One writer for the lifetime of this installation. Never wait on a faulting
     // thread or reset on exit: a later exception must not replace the first one.
     inline volatile LONG g_exceptionFilterEntered = 0;
@@ -388,6 +410,23 @@ namespace Internal {
     }
 
     inline LONG WINAPI exceptionFilter(EXCEPTION_POINTERS* exceptionInfo) {
+        // The std::terminate hook already wrote a full TERMINATE record with the
+        // exception message. Keep it instead of overwriting with the abort exception.
+        if (g_terminateHandled.load(std::memory_order_relaxed) ||
+            InterlockedCompareExchange(&g_exceptionFilterEntered, 0, 0) != 0) {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        // The MSVC runtime's filter routes uncaught C++ exceptions through
+        // std::terminate with current_exception() populated. Replacing that
+        // filter without chaining it bypasses our message capture entirely.
+        // Other native faults, or a missing previous filter, use our raw report.
+        constexpr DWORD msvcExceptionCode = 0xe06d7363;
+        if (exceptionInfo->ExceptionRecord->ExceptionCode == msvcExceptionCode &&
+            g_previousExceptionFilter) {
+            return g_previousExceptionFilter(exceptionInfo);
+        }
+
         return writeWindowsException(exceptionInfo, CaptureStackBackTrace);
     }
 #endif
@@ -518,7 +557,10 @@ inline bool install(const std::string& crashDir) {
     Internal::safeCopy(Internal::g_crashFilePath, crashFile.c_str(), sizeof(Internal::g_crashFilePath));
 
 #ifdef _WIN32
-    SetUnhandledExceptionFilter(Internal::exceptionFilter);
+    auto previousFilter = SetUnhandledExceptionFilter(Internal::exceptionFilter);
+    if (previousFilter != Internal::exceptionFilter) {
+        Internal::g_previousExceptionFilter = previousFilter;
+    }
 #else
     struct sigaction sa;
     sa.sa_sigaction = Internal::signalHandlerWithInfo;
@@ -533,28 +575,66 @@ inline bool install(const std::string& crashDir) {
 #endif
 
     std::set_terminate([]() {
-        const char* msg = "std::terminate called";
+        char msg[1024] = "std::terminate called";
         try {
             if (auto eptr = std::current_exception()) {
                 std::rethrow_exception(eptr);
             }
         } catch (const std::exception& e) {
-            msg = e.what();
+            // Copy while the exception is alive; avoid allocating another string
+            // when termination itself may have been caused by allocation failure.
+            const char* what = e.what();
+            Internal::safeCopy(msg, what, sizeof(msg));
+            size_t length = std::strlen(msg);
+            if (length == sizeof(msg) - 1 && what[length] != '\0') {
+                // Do not split a UTF-8 character at the message limit: a broken
+                // suffix would make next-launch JSON serialization fail.
+                while (length > 0 && (static_cast<unsigned char>(what[length]) & 0xc0) == 0x80) {
+                    --length;
+                }
+                msg[length] = '\0';
+            }
         } catch (...) {
-            msg = "Unknown exception";
+            Internal::safeCopy(msg, "Unknown exception", sizeof(msg));
         }
 
-        std::ofstream f(Internal::g_crashFilePath);
-        if (f.is_open()) {
-            f << "SIGNAL: TERMINATE\n";
-            f << "TIME: " << time(nullptr) << "\n";
-            f << "LOAD_ADDR: 0x" << std::hex << Internal::g_loadAddress << "\n";
-            f << "MODULE_SIZE: 0x" << std::hex << Internal::g_moduleSize << "\n";
-            f << "EXEC_PATH: " << Internal::g_execPath << "\n";
-            f << "MESSAGE: " << msg << "\n";
-            f.close();
+        // Collapse the message to a single line so it stays one MESSAGE record.
+        for (char& c : msg) {
+            if (c == '\n' || c == '\r') c = ' ';
         }
 
+        try {
+            std::ofstream f(Internal::g_crashFilePath, std::ios::trunc);
+            if (f.is_open()) {
+                f << "SIGNAL: TERMINATE\n";
+                f << "TIME: " << time(nullptr) << "\n";
+                f << "LOAD_ADDR: 0x" << std::hex << Internal::g_loadAddress << "\n";
+                f << "MODULE_SIZE: 0x" << std::hex << Internal::g_moduleSize << std::dec << "\n";
+                f << "EXEC_PATH: " << Internal::g_execPath << "\n";
+                f << "MESSAGE: " << msg << "\n";
+                // Best-effort capture before abort(), on both supported platform paths.
+                // Termination may follow resource exhaustion; this is not guaranteed
+                // to succeed just because we are outside a signal handler.
+                void* frames[32];
+#ifdef _WIN32
+                int frameCount = CaptureStackBackTrace(0, 32, frames, nullptr);
+#else
+                int frameCount = backtrace(frames, 32);
+#endif
+                f << "STACKTRACE:\n";
+                for (int i = 0; i < frameCount; i++) {
+                    f << "  0x" << std::hex << reinterpret_cast<std::uintptr_t>(frames[i]) << std::dec << "\n";
+                }
+                f.close();
+                // close() flushes buffered output and reports write/close failures.
+                // Preserve only a complete record; otherwise leave abort's fallback.
+                if (f.good()) {
+                    Internal::g_terminateHandled.store(true, std::memory_order_relaxed);
+                }
+            }
+        } catch (...) {
+            // Stream setup can allocate. Still reach abort's fallback if it fails.
+        }
         std::abort();
     });
 
@@ -679,7 +759,7 @@ inline std::optional<Report> loadPendingReport() {
             report.execPath = line.substr(11);
             inStacktrace = false;
         } else if (line.rfind("MESSAGE: ", 0) == 0) {
-            report.stacktrace = line.substr(9);
+            report.message = line.substr(9);
             inStacktrace = false;
         } else if (line == "STACKTRACE:") {
             inStacktrace = true;

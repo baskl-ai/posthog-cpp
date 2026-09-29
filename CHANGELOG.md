@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.7.8] - 2026-09-29
+
+### Changed
+- Integrate the concurrently merged handled-exception ASLR and installation-path normalization changes, retaining both crash-report preservation and stacktrace stability regressions.
+
+## [1.7.7] - 2026-09-29
+
+### Fixed
+- Check Windows native-writer re-entry before inspecting exception pointers or dispatching to the previous filter, preserving PR #11's recursive and concurrent entry protection.
+
+## [1.7.6] - 2026-09-29
+
+### Fixed
+- Preserve successfully written TERMINATE records when abort invokes a second crash handler, keeping the exception message separate from the stack trace and exposing it in error descriptions.
+- Chain the previous Windows filter for MSVC C++ exceptions so the runtime reaches the terminate hook with the active exception; retain native reporting when no previous filter exists.
+- Capture raw terminate frames on Windows and Unix. Use a shared lock-free atomic preservation flag; retain abort fallback on file or stream setup failure.
+- Copy bounded exception messages while the exception is alive, flatten line breaks, and preserve UTF-8 character boundaries. Exception class names are not captured.
+- Integrate the Windows report integrity and pointer-width fixes from PR #11 without replacing its re-entry guard or fallback writer.
+
+### Tests
+- Add isolated crash/next-launch regressions for standard, unknown, and explicit termination; empty, long, multiline, and UTF-8 messages; failed writes; ordinary aborts; and Windows native/fallback handling.
+
 ## [1.7.5] - 2026-09-29
 
 ### Fixed
