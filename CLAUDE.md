@@ -69,7 +69,11 @@ the update check. (`aim` is the globally-installed, auto-updating build of the s
 - **SDKs**: OFX SDK `../plugin-dependencies/ofx-sdk`, AE SDK `../plugin-dependencies/adobe-ae-sdk`.
 
 ## Plugin render patterns
-- Use `print_if_dev()` for anything that prints every frame, so we don't clog up users' logs.
+- **Nothing may log on every successful frame in prod.** Per-frame logging clogs users'
+  logs and slows render. Guard any per-frame print behind a dev check — `print_if_dev()`
+  in plugin code, or `if is_dev():` in server/framework code (e.g. the per-render
+  `[render] worlds:` line in `Server/methods/v1/call_plugin.py`). Only errors and
+  genuinely once-per-render-session events may log unconditionally.
 - Show a progress bar with `tools.ui.progress_bar(percent: int, info: string)` — mainly
   for "loading model"; with multiple models, ramp 0–99 then 100 when finished.
 - Call `tools.progress(int 0-100)` every frame to drive the host's native progress bar.
@@ -77,5 +81,10 @@ the update check. (`aim` is the globally-installed, auto-updating build of the s
   keeps the user patient; do it between long steps that run every render.
 - Call `tools.maybe_abort()` before any likely-slow lines: it checks if the user aborted
   in the host and exits cleanly if so. Run `aim benchmark --profile` to find slow lines.
+
+- When loading Metal through PyObjC manually, declare owned returns with
+  `already_retained`; missing metadata leaks GPU buffers despite GC/autorelease
+  pools. Verify repeated renders in a memory-bounded subprocess; RSS alone misses
+  GPU memory on macOS.
 
 @README.md
