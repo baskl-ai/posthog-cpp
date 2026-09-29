@@ -16,7 +16,7 @@ add_test(NAME test_internal_user COMMAND test_internal_user)
 # Exercise real terminate/abort handlers, then parse in a fresh process.
 add_executable(terminate_tests terminate_tests.cpp)
 target_link_libraries(terminate_tests PRIVATE posthog)
-set(terminate_scenarios exception multiline unknown explicit empty long open_failure)
+set(terminate_scenarios exception multiline unknown explicit empty long unicode open_failure)
 if(UNIX)
     list(APPEND terminate_scenarios abort)
 endif()

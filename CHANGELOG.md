@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.7.4] - 2026-09-29
+
+### Fixed
+- Keep UTF-8 character boundaries when bounding terminate messages, so a truncated multibyte character cannot break next-launch JSON serialization.
+
 ## [1.7.3] - 2026-09-29
 
 ### Fixed

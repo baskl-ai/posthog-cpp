@@ -644,7 +644,17 @@ inline bool install(const std::string& crashDir) {
         } catch (const std::exception& e) {
             // Copy while the exception is alive; avoid allocating another string
             // when termination itself may have been caused by allocation failure.
-            Internal::safeCopy(msg, e.what(), sizeof(msg));
+            const char* what = e.what();
+            Internal::safeCopy(msg, what, sizeof(msg));
+            size_t length = std::strlen(msg);
+            if (length == sizeof(msg) - 1 && what[length] != '\0') {
+                // Do not split a UTF-8 character at the message limit: a broken
+                // suffix would make next-launch JSON serialization fail.
+                while (length > 0 && (static_cast<unsigned char>(what[length]) & 0xc0) == 0x80) {
+                    --length;
+                }
+                msg[length] = '\0';
+            }
         } catch (...) {
             Internal::safeCopy(msg, "Unknown exception", sizeof(msg));
         }

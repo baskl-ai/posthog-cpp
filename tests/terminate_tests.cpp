@@ -1,6 +1,7 @@
 // Launched in separate processes by terminate_test.cmake: a crash must not kill
 // the test runner, and parsing must exercise the next-launch path.
 #include <posthog/crash_handler.h>
+#include <nlohmann/json.hpp>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
@@ -16,6 +17,7 @@ std::string expectedMessage(const std::string& scenario) {
     if (scenario == "explicit") return "std::terminate called";
     if (scenario == "empty") return "";
     if (scenario == "long") return std::string(1023, 'x');
+    if (scenario == "unicode") return std::string(1022, 'x');
     return "uncaught_boom_marker";
 }
 
@@ -40,6 +42,7 @@ int main(int argc, char** argv) {
               "wrong signal: terminate record overwritten or direct abort suppressed");
         check(report->message == (scenario == "abort" ? "" : expectedMessage(scenario)),
               "exception message lost or malformed");
+        check(!nlohmann::json(report->message).dump().empty(), "message cannot serialize to JSON");
         check(report->stacktrace.find("0x") != std::string::npos, "missing native frames");
         check(report->timestamp.find_first_not_of("0123456789") == std::string::npos,
               "timestamp is not decimal");
@@ -64,5 +67,6 @@ int main(int argc, char** argv) {
     if (scenario == "unknown") throw 42;
     if (scenario == "multiline") throw std::runtime_error("first line\r\nSIGNAL: SIGSEGV");
     if (scenario == "long") throw std::runtime_error(std::string(8192, 'x'));
+    if (scenario == "unicode") throw std::runtime_error(std::string(1022, 'x') + "\xe2\x82\xac");
     throw std::runtime_error(expectedMessage(scenario));
 }
