@@ -39,7 +39,23 @@ else()
     cmake_policy(SET CMP0083 NEW)
     include(CheckPIESupported)
     check_pie_supported()
+    # Mach-O dladdr can resolve local nlist symbols even with hidden visibility.
+    # Strip the fixture explicitly so the offset fallback is actually exercised.
+    add_custom_command(TARGET stacktrace_probe POST_BUILD
+        COMMAND ${CMAKE_STRIP} $<TARGET_FILE:stacktrace_probe>)
+    if(APPLE)
+        add_custom_command(TARGET stacktrace_probe POST_BUILD
+            COMMAND codesign --force --sign - $<TARGET_FILE:stacktrace_probe>)
+    endif()
 endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME stacktrace_stability COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test_stacktrace_stability.py $<TARGET_FILE:stacktrace_probe>)
+
+if(WIN32)
+    add_executable(windows_crash_tests windows_crash_tests.cpp windows_crash_other.cpp)
+    target_include_directories(windows_crash_tests PRIVATE ../include)
+    target_link_libraries(windows_crash_tests PRIVATE psapi shell32)
+    add_test(NAME windows_crash_tests COMMAND windows_crash_tests)
+    set_tests_properties(windows_crash_tests PROPERTIES TIMEOUT 60)
+endif()
