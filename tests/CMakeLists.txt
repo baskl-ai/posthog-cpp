@@ -24,3 +24,22 @@ target_link_libraries(crash PRIVATE posthog)
 # Logging example (requires API key)
 add_executable(logging_example ../examples/logging.cpp)
 target_link_libraries(logging_example PRIVATE posthog)
+
+# A release-like fixture: hidden functions, no PDBs, no inline/tail-call shortcuts.
+# It is copied without symbols and run from two installation paths by the test.
+add_executable(stacktrace_probe stacktrace_probe.cpp)
+target_link_libraries(stacktrace_probe PRIVATE posthog)
+set_target_properties(stacktrace_probe PROPERTIES CXX_VISIBILITY_PRESET hidden)
+if(MSVC)
+    target_compile_options(stacktrace_probe PRIVATE /O2)
+    target_link_options(stacktrace_probe PRIVATE /DEBUG:NONE)
+else()
+    target_compile_options(stacktrace_probe PRIVATE -O2 -g0)
+    set_target_properties(stacktrace_probe PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
+    cmake_policy(SET CMP0083 NEW)
+    include(CheckPIESupported)
+    check_pie_supported()
+endif()
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME stacktrace_stability COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_stacktrace_stability.py $<TARGET_FILE:stacktrace_probe>)

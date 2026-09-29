@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.7.4] - 2026-09-29
+
+### Fixed
+- Complete handled-exception ASLR normalization: unresolved frames use module-relative
+  offsets, unknown-module frames use a stable placeholder, and binary paths use
+  basenames so installation directories do not change grouping.
+- Preserve real resolution flags in the exception payload. Custom frames are passed
+  through by PostHog; this does not enable native server-side symbolication.
+- Validate frame capture limits and safely handle long Windows module paths.
+- Add deterministic relocation/payload tests and optimized symbol-free capture tests
+  across processes, installation directories, and distinct call sites.
+- Synchronize the CMake package version with the SDK header.
+
 ## [1.7.3] - 2026-08-08
 
 ### Fixed

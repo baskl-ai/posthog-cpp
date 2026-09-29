@@ -12,6 +12,7 @@
 // Skip version check to avoid warnings when parent project uses different nlohmann/json version
 #define JSON_SKIP_LIBRARY_VERSION_CHECK
 #include <nlohmann/json.hpp>
+#include "exception_frames.h"
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -298,24 +299,7 @@ public:
 
         json stacktrace;
         stacktrace["type"] = "raw";
-        json framesList = json::array();
-
-        for (const auto& frame : frames) {
-            json f;
-            f["platform"] = "custom";
-            f["lang"] = "cpp";
-            f["function"] = frame.function;
-            if (!frame.filename.empty()) f["filename"] = frame.filename;
-            if (frame.lineno > 0) f["lineno"] = frame.lineno;
-            if (!frame.module.empty()) f["module"] = frame.module;
-            f["in_app"] = frame.inApp;
-            // Address-only fallback frames ("<module>+0x…") are not resolved, so PostHog
-            // keeps trying to symbolify them instead of treating them as final.
-            f["resolved"] = frame.resolved;
-            framesList.push_back(f);
-        }
-
-        stacktrace["frames"] = framesList;
+        stacktrace["frames"] = detail::exceptionFrames(frames);
         exception["stacktrace"] = stacktrace;
         exceptionList.push_back(exception);
 

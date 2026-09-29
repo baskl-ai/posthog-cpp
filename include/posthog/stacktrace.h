@@ -13,6 +13,8 @@
 #ifndef POSTHOG_STACKTRACE_H
 #define POSTHOG_STACKTRACE_H
 
+#include <cstdint>
+#include <limits>
 #include <string>
 #include <sstream>
 #include <vector>
@@ -42,6 +44,30 @@ struct Frame {
     bool inApp = true;       ///< Is this frame from app code
     bool resolved = false;   ///< True when function is a real symbol name, false for a raw offset
 };
+
+namespace detail {
+inline std::string moduleName(const std::string& path) {
+    const auto slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+// Keep address-derived identities stable for the same binary across ASLR slides.
+// Without a module base there is no stable offset; never use the runtime address
+// as a function name, since PostHog includes that field in its fingerprint.
+inline Frame unresolvedFrame(uintptr_t address, uintptr_t base,
+                             const std::string& path) {
+    Frame frame;
+    frame.module = moduleName(path);
+    if (base && address >= base) {
+        std::ostringstream name;
+        name << "<module>+0x" << std::hex << (address - base);
+        frame.function = name.str();
+    } else {
+        frame.function = "(unknown)";
+    }
+    return frame;
+}
+} // namespace detail
 
 /**
  * @brief Capture current stack trace as formatted string
@@ -197,6 +223,8 @@ inline std::vector<std::string> captureAsVector(int maxFrames = 32, int skip = 1
 inline std::vector<Frame> captureStructured(int maxFrames = 32, int skip = 1,
                                              const std::string& appIdentifier = "") {
     std::vector<Frame> frames;
+    if (maxFrames <= 0 || skip < 0 ||
+        skip > (std::numeric_limits<int>::max)() - maxFrames) return frames;
 
 #if defined(_WIN32)
     HANDLE process = GetCurrentProcess();
@@ -204,33 +232,35 @@ inline std::vector<Frame> captureStructured(int maxFrames = 32, int skip = 1,
     SymInitialize(process, NULL, TRUE);
     SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);
 
-    // CaptureStackBackTrace walks the stack without a frame pointer, so it
-    // returns many frames on x64 where seeding STACKFRAME64.AddrFrame from Rbp
-    // used to stop after one or two.
+    // Uses the platform unwinder, including x64 unwind metadata; no frame
+    // pointer assumption is needed.
     std::vector<void*> buffer(maxFrames);
     USHORT captured = CaptureStackBackTrace(skip, static_cast<DWORD>(maxFrames),
                                             buffer.data(), NULL);
 
+    std::vector<char> fullPath(32768);
     for (USHORT i = 0; i < captured; i++) {
-        Frame sf;
         DWORD64 address = reinterpret_cast<DWORD64>(buffer[i]);
 
         // Resolve the module base and name from the address. The module base
         // lets us turn an ASLR-slid absolute address into a stable
         // module-relative offset when no symbol is available.
         DWORD64 moduleBase = 0;
+        std::string modulePath;
         HMODULE hModule = NULL;
         if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                                reinterpret_cast<LPCSTR>(buffer[i]), &hModule) && hModule) {
             moduleBase = reinterpret_cast<DWORD64>(hModule);
-            char fullPath[MAX_PATH];
-            if (GetModuleFileNameA(hModule, fullPath, MAX_PATH)) {
-                std::string path = fullPath;
-                size_t lastSlash = path.find_last_of("\\/");
-                sf.module = (lastSlash != std::string::npos) ? path.substr(lastSlash + 1) : path;
+            // A truncated module name is not a reliable grouping identity.
+            const DWORD length = GetModuleFileNameA(hModule, fullPath.data(),
+                                                     static_cast<DWORD>(fullPath.size()));
+            if (length > 0 && length < fullPath.size()) {
+                modulePath.assign(fullPath.data(), length);
             }
         }
+        Frame sf = detail::unresolvedFrame(static_cast<uintptr_t>(address),
+                                           static_cast<uintptr_t>(moduleBase), modulePath);
 
         char symbolBuffer[sizeof(SYMBOL_INFO) + MAX_SYM_NAME * sizeof(TCHAR)];
         PSYMBOL_INFO symbol = (PSYMBOL_INFO)symbolBuffer;
@@ -250,16 +280,6 @@ inline std::vector<Frame> captureStructured(int maxFrames = 32, int skip = 1,
                 sf.filename = line.FileName;
                 sf.lineno = line.LineNumber;
             }
-        } else if (moduleBase) {
-            // No symbol (plugins ship without PDBs). Emit a stable, ASLR-independent
-            // module-relative offset instead of the absolute runtime address.
-            std::ostringstream oss;
-            oss << "<module>+0x" << std::hex << (address - moduleBase);
-            sf.function = oss.str();
-        } else {
-            std::ostringstream oss;
-            oss << "0x" << std::hex << address;
-            sf.function = oss.str();
         }
 
         // Determine if this is app code
@@ -283,51 +303,26 @@ inline std::vector<Frame> captureStructured(int maxFrames = 32, int skip = 1,
     }
 
     for (int i = skip; i < frameCount && (i - skip) < maxFrames; i++) {
-        Frame sf;
-        Dl_info info;
+        Dl_info info = {};
+        const bool foundModule = dladdr(buffer[i], &info) != 0;
+        Frame sf = detail::unresolvedFrame(reinterpret_cast<uintptr_t>(buffer[i]),
+            foundModule ? reinterpret_cast<uintptr_t>(info.dli_fbase) : 0,
+            foundModule && info.dli_fname ? info.dli_fname : "");
+        // dladdr returns a binary path, not a source file. Keep only its basename
+        // so different installation directories do not change the fingerprint.
+        sf.filename = sf.module;
 
-        if (dladdr(buffer[i], &info)) {
-            if (info.dli_fname) {
-                sf.filename = info.dli_fname;
-                size_t lastSlash = sf.filename.find_last_of('/');
-                if (lastSlash != std::string::npos) {
-                    sf.module = sf.filename.substr(lastSlash + 1);
-                }
-            }
+        if (foundModule && info.dli_sname) {
+            int status = 0;
+            char* demangled = abi::__cxa_demangle(info.dli_sname, nullptr, nullptr, &status);
+            sf.function = status == 0 && demangled ? demangled : info.dli_sname;
+            free(demangled);
+            sf.resolved = true;
+        }
 
-            if (info.dli_sname) {
-                int status = 0;
-                char* demangled = abi::__cxa_demangle(info.dli_sname, nullptr, nullptr, &status);
-                if (status == 0 && demangled) {
-                    sf.function = demangled;
-                    free(demangled);
-                } else {
-                    sf.function = info.dli_sname;
-                }
-                sf.resolved = true;
-            } else if (info.dli_fbase) {
-                // No symbol. Emit a stable, ASLR-independent module-relative offset
-                // instead of the absolute runtime address.
-                uintptr_t offset = reinterpret_cast<uintptr_t>(buffer[i]) -
-                                   reinterpret_cast<uintptr_t>(info.dli_fbase);
-                std::ostringstream oss;
-                oss << "<module>+0x" << std::hex << offset;
-                sf.function = oss.str();
-            } else {
-                std::ostringstream oss;
-                oss << "0x" << std::hex << reinterpret_cast<uintptr_t>(buffer[i]);
-                sf.function = oss.str();
-            }
-
-            // Determine if this is app code
-            if (!appIdentifier.empty()) {
-                sf.inApp = (sf.module.find(appIdentifier) != std::string::npos ||
-                            sf.function.find(appIdentifier) != std::string::npos);
-            }
-        } else {
-            std::ostringstream oss;
-            oss << "0x" << std::hex << reinterpret_cast<uintptr_t>(buffer[i]);
-            sf.function = oss.str();
+        if (!appIdentifier.empty()) {
+            sf.inApp = (sf.module.find(appIdentifier) != std::string::npos ||
+                        sf.function.find(appIdentifier) != std::string::npos);
         }
 
         frames.push_back(sf);
