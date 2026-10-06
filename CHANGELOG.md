@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.8.2] - 2026-10-06
+
+### Fixed
+- Avoid the Windows SDK max macro when validating native crash address ranges.
+
+## [1.8.1] - 2026-10-06
+
+### Fixed
+- Integrate native crash symbolication with the current Windows and terminate report-preservation fixes.
+- Validate native frame/image metadata and restrict symbolication to the captured module.
+- Add crash payload and Mach-O UUID regressions, including legacy reports.
+
+## [1.8.0] - 2026-07-17
+
+### Added
+- Server-side symbolication of native crash reports in PostHog error tracking. Crash
+  frames from a previous session are now sent as `platform: "native"` frames carrying
+  `instruction_addr`, alongside an event-level `$debug_images` entry keyed by the
+  module's debug id and load address. PostHog matches this against an uploaded
+  dSYM/symbol set and resolves the raw addresses to real function names.
+- macOS: capture the Mach-O `LC_UUID` at crash-handler install time and persist it as
+  `DEBUG_ID` in the crash report (async-signal-safe). This is the `debug_id` a dSYM is
+  keyed by.
+
+### Changed
+- `CrashHandler::Report` gained a `debugId` field, written and parsed as `DEBUG_ID:` in
+  the crash file.
+- When no debug id is available (e.g. Windows this release, or crash files written by an
+  older build), crash frames keep the legacy `platform: "custom"` shape, so offline
+  symbolication via `scripts/symbolize.py` still works and nothing regresses.
+
 ## [1.7.8] - 2026-09-29
 
 ### Changed

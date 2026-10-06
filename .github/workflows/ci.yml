@@ -62,13 +62,18 @@ jobs:
           [ "$CPP_ID" = "$PYTHON_ID" ] && echo "✓ IDs match!" || (echo "✗ IDs don't match!" && exit 1)
 
   build-with-curl:
-    name: Build with CURL (Linux)
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    name: Build with CURL (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install libcurl
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
 
       - name: Configure CMake
@@ -76,3 +81,6 @@ jobs:
 
       - name: Build
         run: cmake --build build --config Release
+
+      - name: Test crash payload and regressions
+        run: ctest --test-dir build/tests --output-on-failure -C Release

@@ -13,6 +13,7 @@
 #define JSON_SKIP_LIBRARY_VERSION_CHECK
 #include <nlohmann/json.hpp>
 #include "exception_frames.h"
+#include "crash_frames.h"
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -502,27 +503,16 @@ public:
 
         json stacktrace;
         stacktrace["type"] = "raw";
-        json framesList = json::array();
-
-        std::istringstream ss(report.stacktrace);
-        std::string line;
-        while (std::getline(ss, line)) {
-            if (line.find("0x") != std::string::npos) {
-                json f;
-                f["platform"] = "custom";
-                f["lang"] = "cpp";
-                f["function"] = line;
-                f["in_app"] = true;
-                f["resolved"] = false;
-                framesList.push_back(f);
-            }
-        }
-
-        stacktrace["frames"] = framesList;
+        auto frameProperties = detail::crashFrameProperties(report);
+        stacktrace["frames"] = std::move(frameProperties["frames"]);
         exception["stacktrace"] = stacktrace;
         exceptionList.push_back(exception);
 
         props["$exception_list"] = exceptionList;
+
+        if (frameProperties.contains("$debug_images")) {
+            props["$debug_images"] = std::move(frameProperties["$debug_images"]);
+        }
         j["properties"] = props;
 
         QueuedItem req;

@@ -125,13 +125,31 @@ unrelated crash grouping and symbolizer limitations.
 
 ### Symbolization
 
-Crash stack traces contain only memory addresses. To get function names and line numbers:
+On macOS, new crash reports carry the loaded module's Mach-O UUID and native
+instruction addresses. PostHog can resolve frames from that module after its
+matching dSYM is uploaded (`posthog-cli dsym upload`). The SDK change and symbol
+upload are both required. Rebuild and distribute plugins with the updated SDK;
+existing installations and old crash files do not gain a debug ID retroactively.
+Host/system-library frames keep their raw custom format because this SDK only
+captures metadata for its own module. Handled `trackException()` events use a
+separate path.
+
+Baskl's companion upload workflow is
+[ai-machine#59](https://github.com/baskl-ai/ai-machine/pull/59). It requires
+`POSTHOG_CLI_API_KEY` (a personal key permitted to upload symbols) and
+`POSTHOG_CLI_PROJECT_ID` available to the calling plugin workflow. Workflows
+using `secrets: inherit` already pass these through; explicit secret mappings
+must include them. The ingestion API key cannot authorize symbol uploads.
+
+Windows/Linux, legacy files, and reports with incomplete native metadata keep
+the custom frame shape. Offline symbolization remains available with matching
+build artifacts. To get function names and line numbers:
 
 ```bash
 python scripts/symbolize.py \
-    --executable /path/to/MyApp \
-    --load-address 0x104504000 \
-    --addresses 0x104507698 0x104505bf4 0x104506a10
+    --binary /path/to/MyApp \
+    --load-addr 0x104504000 \
+    --addr 0x104507698
 ```
 
 **Requirements:**
@@ -150,8 +168,8 @@ python scripts/symbolize.py \
 |                      | `trackException()`  | Crash Handler              |
 |----------------------|---------------------|----------------------------|
 | **When**             | Runtime (try/catch) | Signal (SIGSEGV, etc.)     |
-| **Function names**   | ✅ Resolved         | ❌ Addresses only           |
-| **Line numbers**     | ❌ No               | ❌ No (needs symbolization) |
+| **Function names**   | ✅ Resolved         | macOS: server-side with matching dSYM; otherwise offline |
+| **Line numbers**     | ❌ No               | macOS: server-side with matching dSYM; otherwise offline |
 | **Sent immediately** | ✅ Yes              | ❌ Next launch              |
 
 ### Handled-exception grouping

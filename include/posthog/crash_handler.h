@@ -33,6 +33,7 @@
 #include <csignal>
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <deque>
 
 #ifdef _WIN32
@@ -70,6 +71,7 @@ struct Report {
     std::string loadAddress;     ///< Load address for symbolication
     std::string moduleSize;      ///< Size of our module (for address range filtering)
     std::string execPath;        ///< Path to executable
+    std::string debugId;         ///< Module debug id (Mach-O LC_UUID) for server-side symbolication
 };
 
 /**
@@ -96,6 +98,60 @@ namespace Internal {
     inline std::uintptr_t g_loadAddress = 0;
     inline std::size_t g_moduleSize = 0;  // Size of our module for address filtering
     inline char g_execPath[512] = {0};
+    // Formatted before handlers are installed; copied verbatim during a crash.
+    inline char g_debugId[37] = {0};
+
+    inline void formatDebugId(const unsigned char* uuid, char (&output)[37]) {
+        constexpr char hex[] = "0123456789ABCDEF";
+        size_t pos = 0;
+        for (size_t b = 0; b < 16; ++b) {
+            if (b == 4 || b == 6 || b == 8 || b == 10) output[pos++] = '-';
+            output[pos++] = hex[uuid[b] >> 4];
+            output[pos++] = hex[uuid[b] & 0xf];
+        }
+        output[pos] = '\0';
+    }
+
+#ifdef __APPLE__
+    // Called at install time, never from a crash handler. Mach-O vmaddrs are
+    // preferred addresses; image_size must be relative to the mapped header,
+    // excluding __PAGEZERO (notably for standalone executables).
+    inline void readMachOMetadata(const mach_header* header) {
+        g_moduleSize = 0;
+        g_debugId[0] = '\0';
+        if (!header || header->magic != MH_MAGIC_64) return;
+        const auto* h = reinterpret_cast<const mach_header_64*>(header);
+        const char* cursor = reinterpret_cast<const char*>(h + 1);
+        const char* end = cursor + h->sizeofcmds;
+        std::uint64_t preferredBase = 0, imageEnd = 0;
+        bool haveBase = false;
+        for (uint32_t i = 0; i < h->ncmds; ++i) {
+            if (static_cast<size_t>(end - cursor) < sizeof(load_command)) return;
+            const auto* cmd = reinterpret_cast<const load_command*>(cursor);
+            if (cmd->cmdsize < sizeof(load_command) || cmd->cmdsize > static_cast<size_t>(end - cursor)) return;
+            if (cmd->cmd == LC_SEGMENT_64 && cmd->cmdsize >= sizeof(segment_command_64)) {
+                const auto* seg = reinterpret_cast<const segment_command_64*>(cmd);
+                if (std::strncmp(seg->segname, "__PAGEZERO", 16) != 0) {
+                    if (seg->fileoff == 0 && seg->filesize > 0) {
+                        preferredBase = seg->vmaddr;
+                        haveBase = true;
+                    }
+                    if (seg->vmsize <= (std::numeric_limits<std::uint64_t>::max)() - seg->vmaddr) {
+                        const auto segmentEnd = seg->vmaddr + seg->vmsize;
+                        if (segmentEnd > imageEnd) imageEnd = segmentEnd;
+                    }
+                }
+            } else if (cmd->cmd == LC_UUID && cmd->cmdsize >= sizeof(uuid_command)) {
+                const auto* uuid = reinterpret_cast<const uuid_command*>(cmd);
+                formatDebugId(uuid->uuid, g_debugId);
+            }
+            cursor += cmd->cmdsize;
+        }
+        if (haveBase && imageEnd > preferredBase) {
+            g_moduleSize = static_cast<std::size_t>(imageEnd - preferredBase);
+        }
+    }
+#endif
     // Set by the std::terminate hook right before it calls std::abort(). It tells the
     // SIGABRT handler that a full TERMINATE record (with the exception message) is
     // already on disk, so the handler must not truncate and overwrite it.
@@ -264,6 +320,16 @@ namespace Internal {
         safeCopy(ptr, g_execPath, remaining);
         ptr += strlen(ptr);
         remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+        if (g_debugId[0] != '\0') {
+            safeCopy(ptr, "\nDEBUG_ID: ", remaining);
+            ptr += strlen(ptr);
+            remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+            safeCopy(ptr, g_debugId, remaining);
+            ptr += strlen(ptr);
+            remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+        }
 
         safeCopy(ptr, "\nSTACKTRACE:\n", remaining);
         ptr += strlen(ptr);
@@ -532,20 +598,11 @@ inline bool install(const std::string& crashDir) {
         for (uint32_t i = 0; i < imageCount; i++) {
             const struct mach_header* header = _dyld_get_image_header(i);
             if (reinterpret_cast<const void*>(header) == info.dli_fbase) {
-                // Calculate size from mach-o header
-                if (header->magic == MH_MAGIC_64) {
-                    const struct mach_header_64* header64 = reinterpret_cast<const struct mach_header_64*>(header);
-                    const struct load_command* cmd = reinterpret_cast<const struct load_command*>(header64 + 1);
-                    for (uint32_t j = 0; j < header64->ncmds; j++) {
-                        if (cmd->cmd == LC_SEGMENT_64) {
-                            const struct segment_command_64* seg = reinterpret_cast<const struct segment_command_64*>(cmd);
-                            unsigned long segEnd = seg->vmaddr + seg->vmsize;
-                            if (segEnd > Internal::g_moduleSize) {
-                                Internal::g_moduleSize = segEnd;
-                            }
-                        }
-                        cmd = reinterpret_cast<const struct load_command*>(reinterpret_cast<const char*>(cmd) + cmd->cmdsize);
-                    }
+                Internal::readMachOMetadata(header);
+                // This is the plugin/library containing install(), not the host app.
+                if (info.dli_fname) {
+                    Internal::safeCopy(Internal::g_execPath, info.dli_fname,
+                                       sizeof(Internal::g_execPath));
                 }
                 break;
             }
@@ -611,6 +668,9 @@ inline bool install(const std::string& crashDir) {
                 f << "LOAD_ADDR: 0x" << std::hex << Internal::g_loadAddress << "\n";
                 f << "MODULE_SIZE: 0x" << std::hex << Internal::g_moduleSize << std::dec << "\n";
                 f << "EXEC_PATH: " << Internal::g_execPath << "\n";
+                if (Internal::g_debugId[0] != '\0') {
+                    f << "DEBUG_ID: " << Internal::g_debugId << "\n";
+                }
                 f << "MESSAGE: " << msg << "\n";
                 // Best-effort capture before abort(), on both supported platform paths.
                 // Termination may follow resource exhaustion; this is not guaranteed
@@ -757,6 +817,9 @@ inline std::optional<Report> loadPendingReport() {
             inStacktrace = false;
         } else if (line.rfind("EXEC_PATH: ", 0) == 0) {
             report.execPath = line.substr(11);
+            inStacktrace = false;
+        } else if (line.rfind("DEBUG_ID: ", 0) == 0) {
+            report.debugId = line.substr(10);
             inStacktrace = false;
         } else if (line.rfind("MESSAGE: ", 0) == 0) {
             report.message = line.substr(9);
