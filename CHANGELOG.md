@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.8.2] - 2026-10-06
+
+### Fixed
+- Avoid the Windows SDK max macro when validating native crash address ranges.
+
 ## [1.8.1] - 2026-10-06
 
 ### Fixed

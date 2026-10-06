@@ -45,7 +45,7 @@ inline nlohmann::json crashFrameProperties(const CrashHandler::Report& report) {
     const bool native = report.platform == "macOS" && crashDebugId(report.debugId)
         && crashHexAddress(report.loadAddress, base) && base > 0
         && crashHexAddress(report.moduleSize, size) && size > 0
-        && size <= std::numeric_limits<std::uint64_t>::max() - base;
+        && size <= (std::numeric_limits<std::uint64_t>::max)() - base;
     json frames = json::array();
     std::istringstream lines(report.stacktrace);
     std::string line;

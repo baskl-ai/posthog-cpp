@@ -136,7 +136,7 @@ namespace Internal {
                         preferredBase = seg->vmaddr;
                         haveBase = true;
                     }
-                    if (seg->vmsize <= std::numeric_limits<std::uint64_t>::max() - seg->vmaddr) {
+                    if (seg->vmsize <= (std::numeric_limits<std::uint64_t>::max)() - seg->vmaddr) {
                         const auto segmentEnd = seg->vmaddr + seg->vmsize;
                         if (segmentEnd > imageEnd) imageEnd = segmentEnd;
                     }
