@@ -106,15 +106,50 @@ Based on `config.appName`:
 2. **Next launch** → `installCrashHandler()` detects the file and sends `$exception` event
 3. **PostHog** → shows crash in Error Tracking
 
+### Windows crash capture
+
+The Windows exception filter admits one writer per SDK module and saves the
+exception code, full-width instruction address, and module metadata before
+attempting stack capture. Recursive or competing entries return immediately;
+additional frames are appended without replacing that initial report. A fault
+inside stack capture can therefore leave a minimal report with just the original
+instruction address. Reports whose faulting instruction belongs to our module
+remain eligible for upload even without additional frames.
+
+The filter avoids heap allocation, CRT formatting, and DbgHelp symbol lookup.
+Capture is still best effort: invalid stacks, process corruption, or failed file
+I/O can prevent a complete report. Return addresses come from the handler thread,
+not an unwind of the supplied exception context. Offline symbolization requires
+the matching binary/debug symbols; this change does not add a minidump or fix
+unrelated crash grouping and symbolizer limitations.
+
 ### Symbolization
 
-Crash stack traces contain only memory addresses. To get function names and line numbers:
+On macOS, new crash reports carry the loaded module's Mach-O UUID and native
+instruction addresses. PostHog can resolve frames from that module after its
+matching dSYM is uploaded (`posthog-cli dsym upload`). The SDK change and symbol
+upload are both required. Rebuild and distribute plugins with the updated SDK;
+existing installations and old crash files do not gain a debug ID retroactively.
+Host/system-library frames keep their raw custom format because this SDK only
+captures metadata for its own module. Handled `trackException()` events use a
+separate path.
+
+Baskl's companion upload workflow is
+[ai-machine#59](https://github.com/baskl-ai/ai-machine/pull/59). It requires
+`POSTHOG_CLI_API_KEY` (a personal key permitted to upload symbols) and
+`POSTHOG_CLI_PROJECT_ID` available to the calling plugin workflow. Workflows
+using `secrets: inherit` already pass these through; explicit secret mappings
+must include them. The ingestion API key cannot authorize symbol uploads.
+
+Windows/Linux, legacy files, and reports with incomplete native metadata keep
+the custom frame shape. Offline symbolization remains available with matching
+build artifacts. To get function names and line numbers:
 
 ```bash
 python scripts/symbolize.py \
-    --executable /path/to/MyApp \
-    --load-address 0x104504000 \
-    --addresses 0x104507698 0x104505bf4 0x104506a10
+    --binary /path/to/MyApp \
+    --load-addr 0x104504000 \
+    --addr 0x104507698
 ```
 
 **Requirements:**
@@ -133,9 +168,24 @@ python scripts/symbolize.py \
 |                      | `trackException()`  | Crash Handler              |
 |----------------------|---------------------|----------------------------|
 | **When**             | Runtime (try/catch) | Signal (SIGSEGV, etc.)     |
-| **Function names**   | ✅ Resolved         | ❌ Addresses only           |
-| **Line numbers**     | ❌ No               | ❌ No (needs symbolization) |
+| **Function names**   | ✅ Resolved         | macOS: server-side with matching dSYM; otherwise offline |
+| **Line numbers**     | ❌ No               | macOS: server-side with matching dSYM; otherwise offline |
 | **Sent immediately** | ✅ Yes              | ❌ Next launch              |
+
+### Handled-exception grouping
+
+`trackException()` uses symbol names when available and `<module>+0x<offset>`
+with a module basename otherwise. Offsets are stable across ASLR relocations of
+**the same binary**, not necessarily across builds or different call paths.
+Frames with no module base use `(unknown)`; they cannot distinguish locations.
+On macOS/Linux, `dladdr` binary paths are reduced to basenames to avoid grouping
+by installation directory. Address-only frames have `resolved=false`.
+
+These are PostHog `custom` frames, which the server passes through; marking a
+frame unresolved does **not** enable native symbolication. Grouping still depends
+on PostHog's grouping algorithm, exception text, and any custom rules. This fixes
+unstable frame inputs, not historical issues or every source of grouping noise.
+The crash-reporting path is separate.
 
 ## Privacy and Opt-Out
 

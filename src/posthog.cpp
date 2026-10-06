@@ -12,6 +12,8 @@
 // Skip version check to avoid warnings when parent project uses different nlohmann/json version
 #define JSON_SKIP_LIBRARY_VERSION_CHECK
 #include <nlohmann/json.hpp>
+#include "exception_frames.h"
+#include "crash_frames.h"
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -22,7 +24,6 @@
 #include <atomic>
 #include <ctime>
 #include <cstdlib>
-#include <cctype>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -299,22 +300,7 @@ public:
 
         json stacktrace;
         stacktrace["type"] = "raw";
-        json framesList = json::array();
-
-        for (const auto& frame : frames) {
-            json f;
-            f["platform"] = "custom";
-            f["lang"] = "cpp";
-            f["function"] = frame.function;
-            if (!frame.filename.empty()) f["filename"] = frame.filename;
-            if (frame.lineno > 0) f["lineno"] = frame.lineno;
-            if (!frame.module.empty()) f["module"] = frame.module;
-            f["in_app"] = frame.inApp;
-            f["resolved"] = true;
-            framesList.push_back(f);
-        }
-
-        stacktrace["frames"] = framesList;
+        stacktrace["frames"] = detail::exceptionFrames(frames);
         exception["stacktrace"] = stacktrace;
         exceptionList.push_back(exception);
 
@@ -427,8 +413,13 @@ public:
                     description += " (invalid permissions for mapped object)";
                 }
             }
+        } else if (report.signalName == "TERMINATE") {
+            // Uncaught C++ exception. The message is the exception's what() text.
+            description = report.message.empty() ? "Unhandled C++ exception" : report.message;
         } else if (report.signalName == "SIGABRT") {
-            description = "Aborted";
+            // A genuine abort() keeps the "Aborted" label; if a terminate message
+            // survived, surface it so the issue names the exception.
+            description = report.message.empty() ? "Aborted" : report.message;
         } else if (report.signalName == "SIGBUS") {
             description = "Bus Error";
             if (!report.faultAddress.empty()) {
@@ -512,82 +503,15 @@ public:
 
         json stacktrace;
         stacktrace["type"] = "raw";
-        json framesList = json::array();
-
-        // When we captured the module's debug id (Mach-O UUID) we can hand PostHog
-        // everything cymbal needs to symbolicate server-side: each frame's absolute
-        // instruction address as `instruction_addr` on a "native" frame, plus an
-        // event-level `$debug_images` entry keyed by debug_id + load address that
-        // the uploaded dSYM is matched against. Without a debug id there is nothing
-        // to match, so we keep the legacy "custom" frames (raw text, offline-only
-        // symbolication via scripts/symbolize.py).
-        const bool canSymbolicate = !report.debugId.empty();
-
-        std::istringstream ss(report.stacktrace);
-        std::string line;
-        while (std::getline(ss, line)) {
-            size_t hexPos = line.find("0x");
-            if (hexPos == std::string::npos) {
-                continue;
-            }
-
-            json f;
-            f["lang"] = "cpp";
-            f["in_app"] = true;
-            f["resolved"] = false;
-
-            if (canSymbolicate) {
-                // Extract the leading hex token (e.g. "0x302b7ef74") as the address.
-                size_t end = hexPos + 2;
-                while (end < line.size() && std::isxdigit(static_cast<unsigned char>(line[end]))) {
-                    end++;
-                }
-                f["platform"] = "native";
-                f["instruction_addr"] = line.substr(hexPos, end - hexPos);
-                if (!report.loadAddress.empty()) {
-                    f["image_addr"] = report.loadAddress;
-                }
-                // Keep the raw line as a human-readable fallback if a frame can't be resolved.
-                f["function"] = line;
-            } else {
-                f["platform"] = "custom";
-                f["function"] = line;
-            }
-
-            framesList.push_back(f);
-        }
-
-        stacktrace["frames"] = framesList;
+        auto frameProperties = detail::crashFrameProperties(report);
+        stacktrace["frames"] = std::move(frameProperties["frames"]);
         exception["stacktrace"] = stacktrace;
         exceptionList.push_back(exception);
 
         props["$exception_list"] = exceptionList;
 
-        // Debug images let PostHog map the raw addresses above to the uploaded dSYM.
-        if (canSymbolicate) {
-            json image;
-            image["debug_id"] = report.debugId;
-            if (!report.loadAddress.empty()) {
-                image["image_addr"] = report.loadAddress;
-            }
-            if (!report.moduleSize.empty()) {
-                try {
-                    image["image_size"] = std::stoull(report.moduleSize, nullptr, 16);
-                } catch (...) {
-                    // Non-fatal: image_size is optional for symbolication.
-                }
-            }
-            if (!report.execPath.empty()) {
-                image["code_file"] = report.execPath;
-            }
-            if (report.platform == "macOS") {
-                image["type"] = "macho";
-            } else if (report.platform == "Windows") {
-                image["type"] = "pe";
-            } else {
-                image["type"] = "elf";
-            }
-            props["$debug_images"] = json::array({image});
+        if (frameProperties.contains("$debug_images")) {
+            props["$debug_images"] = std::move(frameProperties["$debug_images"]);
         }
         j["properties"] = props;
 

@@ -8,6 +8,8 @@
 #include <posthog/stacktrace.h>
 #include <posthog/crash_handler.h>
 #include <posthog/logging.h>
+#include "../src/exception_frames.h"
+#include "../src/crash_frames.h"
 #include <iostream>
 #include <cassert>
 #include <fstream>
@@ -28,6 +30,123 @@
         exit(1); \
     } \
 } while(0)
+
+TEST(crash_native_payload) {
+    PostHog::CrashHandler::Report report;
+    report.platform = "macOS";
+    report.debugId = "12345678-9ABC-DEF0-1234-56789ABCDEF0";
+    report.loadAddress = "0x100000000";
+    report.moduleSize = "0x1000";
+    report.execPath = "/plugins/example.plugin";
+    report.stacktrace = "  0x100000080\n  0x700000010\n  0x100000100\n";
+    auto props = PostHog::detail::crashFrameProperties(report);
+    const auto& image = props["$debug_images"][0];
+    CHECK(image["debug_id"] == report.debugId);
+    CHECK(image["image_addr"] == report.loadAddress);
+    CHECK(image["image_size"] == 4096);
+    CHECK(image["code_file"] == report.execPath);
+    CHECK(image["type"] == "macho");
+    CHECK(props["frames"].size() == 3);
+    // Native output is bottom-up, and an unrelated library never borrows our image.
+    CHECK(props["frames"][0]["instruction_addr"] == "0x100000100");
+    CHECK(props["frames"][0]["image_addr"] == report.loadAddress);
+    CHECK(props["frames"][1]["platform"] == "custom");
+    CHECK(!props["frames"][1].contains("image_addr"));
+    CHECK(props["frames"][1]["in_app"] == false);
+    CHECK(props["frames"][2]["instruction_addr"] == "0x100000080");
+    CHECK(props["frames"][2]["resolved"] == false);
+
+    report.stacktrace = "0xffffffff\n0x100000000\n0x100000fff\n0x100001000\n0x\n0x10000000000000000\n";
+    props = PostHog::detail::crashFrameProperties(report);
+    CHECK(props["frames"].size() == 4);
+    CHECK(props["frames"][0]["platform"] == "custom");
+    CHECK(props["frames"][1]["platform"] == "native");
+    CHECK(props["frames"][2]["platform"] == "native");
+    CHECK(props["frames"][3]["platform"] == "custom");
+    report.stacktrace = "0x700000000\n";
+    CHECK(!PostHog::detail::crashFrameProperties(report).contains("$debug_images"));
+}
+
+TEST(crash_legacy_and_invalid_metadata) {
+    PostHog::CrashHandler::Report report;
+    report.platform = "macOS";
+    report.loadAddress = "0x100000000";
+    report.moduleSize = "0x1000";
+    report.stacktrace = "  0x100000080\n  0x100000100\n";
+    auto checkLegacy = [](const auto& r) {
+        auto props = PostHog::detail::crashFrameProperties(r);
+        CHECK(!props.contains("$debug_images"));
+        CHECK(props["frames"][0]["platform"] == "custom");
+        CHECK(props["frames"][0]["function"] == "  0x100000080");
+        CHECK(!props["frames"][0].contains("instruction_addr"));
+    };
+    checkLegacy(report);
+    for (const std::string id : {"not-a-uuid", "12345678-9abc-def0-1234-56789abcdef0",
+                               "00000000-0000-0000-0000-000000000000"}) {
+        report.debugId = id;
+        checkLegacy(report);
+    }
+    report.debugId = "12345678-9ABC-DEF0-1234-56789ABCDEF0";
+    for (const std::string base : {"", "0x0", "0xg", "0x100000000trailing",
+                                 "0x10000000000000000", "0xfffffffffffffff0"}) {
+        report.loadAddress = base;
+        checkLegacy(report);
+    }
+    report.loadAddress = "0x100000000";
+    for (const std::string size : {"", "0x0", "0x-1", "0x1000trailing"}) {
+        report.moduleSize = size;
+        checkLegacy(report);
+    }
+    report.moduleSize = "0x1000";
+    for (const std::string platform : {"Windows", "Linux"}) {
+        report.platform = platform;
+        checkLegacy(report);
+    }
+}
+
+TEST(crash_debug_id_format) {
+    const unsigned char uuid[16] = {0x12,0x34,0x56,0x78,0x9a,0xbc,0xde,0xf0,
+                                   0x12,0x34,0x56,0x78,0x9a,0xbc,0xde,0xf0};
+    char output[37];
+    PostHog::CrashHandler::Internal::formatDebugId(uuid, output);
+    CHECK(std::string(output) == "12345678-9ABC-DEF0-1234-56789ABCDEF0");
+}
+
+#ifdef __APPLE__
+TEST(crash_macho_preferred_base) {
+    struct Image {
+        mach_header_64 header{};
+        segment_command_64 pagezero{}, text{}, data{};
+        uuid_command uuid{};
+    } image;
+    image.header.magic = MH_MAGIC_64;
+    image.header.ncmds = 4;
+    image.header.sizeofcmds = sizeof(image) - sizeof(image.header);
+    for (auto* seg : {&image.pagezero, &image.text, &image.data}) {
+        seg->cmd = LC_SEGMENT_64;
+        seg->cmdsize = sizeof(*seg);
+    }
+    std::strcpy(image.pagezero.segname, "__PAGEZERO");
+    image.pagezero.vmsize = 0x100000000;
+    std::strcpy(image.text.segname, "__TEXT");
+    image.text.vmaddr = 0x100000000;
+    image.text.filesize = image.text.vmsize = 0x4000;
+    image.data.vmaddr = 0x100004000;
+    image.data.fileoff = 0x4000;
+    image.data.filesize = image.data.vmsize = 0x2000;
+    image.uuid.cmd = LC_UUID;
+    image.uuid.cmdsize = sizeof(image.uuid);
+    for (size_t i = 0; i < 16; ++i) image.uuid.uuid[i] = static_cast<unsigned char>(i);
+    PostHog::CrashHandler::Internal::readMachOMetadata(reinterpret_cast<mach_header*>(&image));
+    CHECK(PostHog::CrashHandler::Internal::g_moduleSize == 0x6000);
+    CHECK(std::string(PostHog::CrashHandler::Internal::g_debugId) == "00010203-0405-0607-0809-0A0B0C0D0E0F");
+    // A plugin dylib usually has preferred base zero.
+    image.text.vmaddr = 0;
+    image.data.vmaddr = 0x4000;
+    PostHog::CrashHandler::Internal::readMachOMetadata(reinterpret_cast<mach_header*>(&image));
+    CHECK(PostHog::CrashHandler::Internal::g_moduleSize == 0x6000);
+}
+#endif
 
 TEST(machine_id_not_empty) {
     std::string id = PostHog::MachineID::getHashedMacId();
@@ -54,6 +173,55 @@ TEST(stacktrace_structured) {
     auto frames = PostHog::Stacktrace::captureStructured(10, 0);
     CHECK(!frames.empty());
     CHECK(!frames[0].function.empty());
+}
+
+TEST(stacktrace_offset_frames_not_resolved) {
+    auto frames = PostHog::Stacktrace::captureStructured(20, 0);
+    CHECK(!frames.empty());
+    for (const auto& f : frames) {
+        CHECK(f.function.rfind("0x", 0) != 0);
+        if (f.function.rfind("<module>+0x", 0) == 0 || f.function == "(unknown)") {
+            CHECK(!f.resolved);
+        }
+    }
+}
+
+TEST(stacktrace_stable_wire_frames) {
+    using PostHog::Stacktrace::detail::unresolvedFrame;
+    using PostHog::detail::exceptionFrames;
+    auto a = unresolvedFrame(0x101234, 0x100000, "/install/a/plugin.so");
+    auto b = unresolvedFrame(0x701234, 0x700000, "/install/b/plugin.so");
+    CHECK(a.function == "<module>+0x1234");
+    CHECK(a.module == "plugin.so");
+    CHECK(exceptionFrames({a}) == exceptionFrames({b}));
+    CHECK(exceptionFrames({a})[0]["resolved"] == false);
+    CHECK(exceptionFrames({a}) != exceptionFrames({
+        unresolvedFrame(0x701235, 0x700000, "/install/b/plugin.so")}));
+    CHECK(exceptionFrames({a}) != exceptionFrames({
+        unresolvedFrame(0x701234, 0x700000, "/install/b/other.so")}));
+    CHECK(unresolvedFrame(0x1234, 0x1000, "C:\\plugins\\plugin.dll").module == "plugin.dll");
+    CHECK(unresolvedFrame(0x1234, 0x1000, "plugin.so").module == "plugin.so");
+    auto unknown = unresolvedFrame(0x1234, 0, "");
+    CHECK(unknown.function == "(unknown)");
+    CHECK(exceptionFrames({unknown}) == exceptionFrames({unresolvedFrame(0x9876, 0, "")}));
+    CHECK(unresolvedFrame(0x1234, 0x2000, "").function == "(unknown)");
+    a.function = "actual_function";
+    a.resolved = true;
+    a.filename = "source.cpp";
+    a.lineno = 42;
+    const auto resolved = exceptionFrames({a})[0];
+    CHECK(resolved["resolved"] == true);
+    CHECK(resolved["function"] == "actual_function");
+    CHECK(resolved["filename"] == "source.cpp");
+    CHECK(resolved["lineno"] == 42);
+}
+
+TEST(stacktrace_invalid_limits) {
+    CHECK(PostHog::Stacktrace::captureStructured(0).empty());
+    CHECK(PostHog::Stacktrace::captureStructured(-1).empty());
+    CHECK(PostHog::Stacktrace::captureStructured(1, -1).empty());
+    CHECK(PostHog::Stacktrace::captureStructured(1, (std::numeric_limits<int>::max)()).empty());
+    CHECK(PostHog::Stacktrace::captureStructured(1, 0).size() == 1);
 }
 
 TEST(client_init_without_apikey) {
@@ -381,11 +549,20 @@ TEST(crash_filter_no_module_size) {
 
 int main() {
     std::cout << "=== PostHog Unit Tests ===" << std::endl;
+    RUN_TEST(crash_native_payload);
+    RUN_TEST(crash_legacy_and_invalid_metadata);
+    RUN_TEST(crash_debug_id_format);
+#ifdef __APPLE__
+    RUN_TEST(crash_macho_preferred_base);
+#endif
 
     RUN_TEST(machine_id_not_empty);
     RUN_TEST(machine_id_algorithm);
     RUN_TEST(stacktrace_capture);
     RUN_TEST(stacktrace_structured);
+    RUN_TEST(stacktrace_offset_frames_not_resolved);
+    RUN_TEST(stacktrace_stable_wire_frames);
+    RUN_TEST(stacktrace_invalid_limits);
     RUN_TEST(client_init_without_apikey);
     RUN_TEST(client_distinct_id);
     RUN_TEST(client_enable_disable);
