@@ -503,8 +503,9 @@ public:
 
         json stacktrace;
         stacktrace["type"] = "raw";
-        auto frameProperties = detail::crashFrameProperties(report);
+        auto frameProperties = detail::crashFrameProperties(report, config.appName);
         stacktrace["frames"] = std::move(frameProperties["frames"]);
+        props["crash_stacktrace"] = report.stacktrace;
         exception["stacktrace"] = stacktrace;
         exceptionList.push_back(exception);
 

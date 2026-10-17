@@ -187,6 +187,17 @@ def parse_crash_file(crash_path: str) -> dict:
 def parse_exception_list_data(data) -> dict:
     """Parse PostHog $exception_list JSON data."""
 
+    # Full events retain raw addresses even after frame inputs are normalized.
+    if isinstance(data, dict):
+        props = data.get("properties", data)
+        if "crash_stacktrace" in props:
+            return {
+                "signal": (props.get("$exception_list") or [{}])[0].get("type", "Unknown"),
+                "load_address": props.get("load_address"),
+                "addresses": re.findall(r"0[xX][0-9a-fA-F]+", props["crash_stacktrace"]),
+            }
+        data = props.get("$exception_list", data)
+
     # Handle both array and single object
     if isinstance(data, list):
         exception = data[0] if data else {}
@@ -206,7 +217,14 @@ def parse_exception_list_data(data) -> dict:
     for frame in frames:
         # Try mangled_name first (PostHog format), then function
         func = frame.get("mangled_name", "") or frame.get("function", "")
-        # Extract address from function field (format: "  0x12345678" or "0x12345678")
+        # A normalized frame needs the original load address. Keep its tag so
+        # symbolize_crash can reconstruct that address per frame, without
+        # treating untouched system-library addresses as relative offsets.
+        relative = re.search(r'<module>\+(0x[0-9a-fA-F]+)', func)
+        if relative:
+            result["addresses"].append("<module>+" + relative.group(1))
+            continue
+        # Legacy raw frame.
         match = re.search(r'0x[0-9a-fA-F]+', func)
         if match:
             result["addresses"].append(match.group(0))
@@ -260,6 +278,13 @@ def symbolize_crash(crash_data: dict, binary: str, load_addr_override: str = Non
     print("-" * 60)
 
     for i, addr in enumerate(crash_data.get("addresses", [])):
+        if addr.startswith("<module>+"):
+            if not load_addr:
+                print(f"  #{i}: {addr} (needs --load-addr or a full event JSON)")
+                continue
+            # atos needs the original runtime address, including the preferred
+            # image base. A module offset is not a Mach-O virtual address.
+            addr = hex(int(load_addr, 16) + int(addr[len("<module>+"):], 16))
         symbol = symbolize_address(binary, load_addr, addr)
         if symbol:
             print(f"  #{i}: {addr}")

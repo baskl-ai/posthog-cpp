@@ -35,7 +35,7 @@ class Receiver(http.server.BaseHTTPRequestHandler):
 
 probe, module, sender = (Path(p).resolve() for p in sys.argv[1:])
 with tempfile.TemporaryDirectory(prefix="posthog-real-crash-") as temp:
-    root = Path(temp)
+    root = Path(temp).resolve()
     symbols = {}
     for binary in (probe, module):
         dsym = root / (binary.name + ".dSYM")

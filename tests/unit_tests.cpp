@@ -58,11 +58,13 @@ TEST(crash_native_payload) {
 
     report.stacktrace = "0xffffffff\n0x100000000\n0x100000fff\n0x100001000\n0x\n0x10000000000000000\n";
     props = PostHog::detail::crashFrameProperties(report);
-    CHECK(props["frames"].size() == 4);
+    CHECK(props["frames"].size() == 6);
     CHECK(props["frames"][0]["platform"] == "custom");
-    CHECK(props["frames"][1]["platform"] == "native");
-    CHECK(props["frames"][2]["platform"] == "native");
-    CHECK(props["frames"][3]["platform"] == "custom");
+    CHECK(props["frames"][1]["platform"] == "custom");
+    CHECK(props["frames"][2]["platform"] == "custom");
+    CHECK(props["frames"][3]["platform"] == "native");
+    CHECK(props["frames"][4]["platform"] == "native");
+    CHECK(props["frames"][5]["platform"] == "custom");
     report.stacktrace = "0x700000000\n";
     CHECK(!PostHog::detail::crashFrameProperties(report).contains("$debug_images"));
 }
@@ -73,11 +75,11 @@ TEST(crash_legacy_and_invalid_metadata) {
     report.loadAddress = "0x100000000";
     report.moduleSize = "0x1000";
     report.stacktrace = "  0x100000080\n  0x100000100\n";
-    auto checkLegacy = [](const auto& r) {
+    auto checkLegacy = [](const auto& r, bool normalized = true) {
         auto props = PostHog::detail::crashFrameProperties(r);
         CHECK(!props.contains("$debug_images"));
         CHECK(props["frames"][0]["platform"] == "custom");
-        CHECK(props["frames"][0]["function"] == "  0x100000080");
+        CHECK(props["frames"][0]["function"] == (normalized ? "<module>+0x80" : "  0x100000080"));
         CHECK(!props["frames"][0].contains("instruction_addr"));
     };
     checkLegacy(report);
@@ -90,12 +92,12 @@ TEST(crash_legacy_and_invalid_metadata) {
     for (const std::string base : {"", "0x0", "0xg", "0x100000000trailing",
                                  "0x10000000000000000", "0xfffffffffffffff0"}) {
         report.loadAddress = base;
-        checkLegacy(report);
+        checkLegacy(report, false);
     }
     report.loadAddress = "0x100000000";
     for (const std::string size : {"", "0x0", "0x-1", "0x1000trailing"}) {
         report.moduleSize = size;
-        checkLegacy(report);
+        checkLegacy(report, false);
     }
     report.moduleSize = "0x1000";
     for (const std::string platform : {"Windows", "Linux"}) {
@@ -138,8 +140,9 @@ TEST(crash_fault_instruction) {
     CHECK(!PostHog::CrashHandler::hasAddressesFromOurModule(report));
     report.stacktrace = "  Exception at: 0x100000080\n  0x100000080junk\n  0x100000080000000000\n";
     props = PostHog::detail::crashFrameProperties(report);
-    CHECK(props["frames"].size() == 1);
-    CHECK(props["frames"][0]["instruction_addr"] == "0x100000080");
+    CHECK(props["frames"].size() == 3);
+    CHECK(props["frames"][0]["platform"] == "custom");
+    CHECK(!props["frames"][0].contains("instruction_addr"));
 }
 
 #ifdef __APPLE__

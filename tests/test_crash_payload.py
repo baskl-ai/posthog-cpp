@@ -60,7 +60,8 @@ with tempfile.TemporaryDirectory(prefix="posthog-crash-payload-") as temp:
             else:
                 assert "$debug_images" not in props
                 assert all(f["platform"] == "custom" for f in frames)
-                assert frames[0]["function"] == "  0x100000080"
+                assert frames[0]["function"] == "<module>+0x80"
+                assert frames[0]["module"] == "crash_payload_test"
                 assert all("instruction_addr" not in f for f in frames)
     finally:
         server.shutdown()

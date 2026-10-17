@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <limits>
 #include <deque>
+#include <limits>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -48,6 +49,9 @@
 #include <execinfo.h>
 #include <sys/stat.h>
 #include <dlfcn.h>
+#ifdef __linux__
+#include <link.h>
+#endif
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
@@ -153,14 +157,13 @@ namespace Internal {
                 if (cmd->cmdsize < sizeof(segment_command_64)) return;
                 const auto* seg = reinterpret_cast<const segment_command_64*>(cmd);
                 if (std::strncmp(seg->segname, "__PAGEZERO", 16) != 0) {
-                    if (seg->fileoff == 0 && seg->filesize > 0) {
+                    if (seg->fileoff == 0 && seg->filesize > 0 && (!haveBase || seg->vmaddr < preferredBase)) {
                         preferredBase = seg->vmaddr;
                         haveBase = true;
                     }
-                    if (seg->vmsize <= (std::numeric_limits<std::uint64_t>::max)() - seg->vmaddr) {
-                        const auto segmentEnd = seg->vmaddr + seg->vmsize;
-                        if (segmentEnd > imageEnd) imageEnd = segmentEnd;
-                    }
+                    if (seg->vmsize > (std::numeric_limits<std::uint64_t>::max)() - seg->vmaddr) return;
+                    const auto segmentEnd = seg->vmaddr + seg->vmsize;
+                    if (segmentEnd > imageEnd) imageEnd = segmentEnd;
                 }
             } else if (cmd->cmd == LC_UUID) {
                 if (cmd->cmdsize < sizeof(uuid_command) || haveUuid) return;
@@ -649,6 +652,28 @@ inline bool install(const std::string& crashDir) {
                 break;
             }
         }
+#elif defined(__linux__)
+        // Resolve the image while it is loaded. The next process cannot dladdr
+        // addresses belonging to the crashed process's ASLR layout.
+        dl_iterate_phdr([](struct dl_phdr_info* image, std::size_t, void*) {
+            const auto base = Internal::g_loadAddress;
+            std::uintptr_t end = 0;
+            bool containsModule = false;
+            for (std::size_t i = 0; i < image->dlpi_phnum; ++i) {
+                const auto& segment = image->dlpi_phdr[i];
+                if (segment.p_type != PT_LOAD) continue;
+                const auto limit = (std::numeric_limits<std::uintptr_t>::max)();
+                if (segment.p_vaddr > limit - image->dlpi_addr) return 0;
+                const auto start = image->dlpi_addr + segment.p_vaddr;
+                if (segment.p_memsz > limit - start) return 0;
+                const auto segmentEnd = start + segment.p_memsz;
+                if (base >= start && base < segmentEnd) containsModule = true;
+                if (segmentEnd > end) end = segmentEnd;
+            }
+            if (!containsModule || end <= base) return 0;
+            Internal::g_moduleSize = end - base;
+            return 1;
+        }, nullptr);
 #endif
     }
 #endif

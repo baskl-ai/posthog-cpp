@@ -94,6 +94,20 @@ if(APPLE)
             $<TARGET_FILE:native_metadata_module> $<TARGET_FILE:crash_payload_probe>)
     endif()
 endif()
+add_executable(crash_frames_tests crash_frames_tests.cpp)
+target_link_libraries(crash_frames_tests PRIVATE posthog)
+add_test(NAME crash_frames COMMAND crash_frames_tests)
+add_executable(crash_report_probe crash_report_probe.cpp)
+target_link_libraries(crash_report_probe PRIVATE posthog)
+add_test(NAME crash_report_stability COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_crash_reports.py $<TARGET_FILE:crash_report_probe>)
+if(POSTHOG_USE_CURL AND (TARGET libcurl_static OR TARGET CURL::libcurl))
+    add_test(NAME crash_report_http COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_crash_reports.py $<TARGET_FILE:crash_report_probe> http)
+    set_tests_properties(crash_report_http PROPERTIES TIMEOUT 60)
+endif()
+add_test(NAME symbolize COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_symbolize.py)
+set_tests_properties(crash_frames crash_report_stability symbolize PROPERTIES TIMEOUT 60)
 add_test(NAME stacktrace_stability COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test_stacktrace_stability.py $<TARGET_FILE:stacktrace_probe>)
 

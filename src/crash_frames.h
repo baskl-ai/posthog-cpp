@@ -4,17 +4,60 @@
 #include <posthog/crash_handler.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
-#include <charconv>
 #include <limits>
 #include <vector>
 
 namespace PostHog {
 namespace detail {
 
-inline bool crashHexAddress(const std::string& text, std::uint64_t& value) {
-    if (text.size() <= 2 || text[0] != '0' || (text[1] != 'x' && text[1] != 'X')) return false;
-    const auto parsed = std::from_chars(text.data() + 2, text.data() + text.size(), value, 16);
-    return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size();
+// Reports are parsed on the next launch, never in the signal handler. Require
+// the complete token: stoull alone accepts signs, whitespace and trailing junk.
+inline bool crashHex(const std::string& text, std::uint64_t& value) {
+    std::size_t i = 0;
+    if (text.size() >= 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) i = 2;
+    if (i == text.size()) return false;
+    value = 0;
+    for (; i < text.size(); ++i) {
+        const char c = text[i];
+        const unsigned digit = c >= '0' && c <= '9' ? c - '0' :
+            c >= 'a' && c <= 'f' ? c - 'a' + 10 :
+            c >= 'A' && c <= 'F' ? c - 'A' + 10 : 16;
+        if (digit == 16 || value > ((std::numeric_limits<std::uint64_t>::max)() - digit) / 16)
+            return false;
+        value = value * 16 + digit;
+    }
+    return true;
+}
+
+inline nlohmann::json crashFrames(const CrashHandler::Report& report, const std::string& appName = "") {
+    std::uint64_t base = 0, size = 0;
+    const bool haveRange = crashHex(report.loadAddress, base) && base != 0 &&
+        crashHex(report.moduleSize, size) && size != 0 &&
+        size <= (std::numeric_limits<std::uint64_t>::max)() - base;
+    auto frames = nlohmann::json::array();
+    std::istringstream trace(report.stacktrace);
+    std::string line;
+    while (std::getline(trace, line)) {
+        if (line.find("0x") == std::string::npos && line.find("0X") == std::string::npos) continue;
+        // The writer emits one address per line. Do not normalize an arbitrary
+        // hex substring of malformed or legacy symbol-rich text.
+        const auto first = line.find_first_not_of(" \t\r");
+        const auto last = line.find_last_not_of(" \t\r");
+        std::uint64_t address = 0;
+        const bool parsed = first != std::string::npos &&
+            crashHex(line.substr(first, last - first + 1), address);
+        const bool inModule = haveRange && parsed && address >= base && address - base < size;
+        nlohmann::json frame = {{"platform", "custom"}, {"lang", "cpp"},
+            {"function", line}, {"in_app", haveRange ? inModule : true}, {"resolved", false}};
+        if (inModule) {
+            std::ostringstream offset;
+            offset << "<module>+0x" << std::hex << (address - base);
+            frame["function"] = offset.str();
+            if (!appName.empty()) frame["module"] = appName;
+        }
+        frames.push_back(std::move(frame));
+    }
+    return frames;
 }
 
 inline bool crashDebugId(const std::string& text) {
@@ -34,27 +77,36 @@ inline bool crashDebugId(const std::string& text) {
 
 // Shared by the sender and tests. Addresses always come from the saved session,
 // never from the possibly updated/rebased binary running on the next launch.
-inline nlohmann::json crashFrameProperties(const CrashHandler::Report& report) {
+inline nlohmann::json crashFrameProperties(const CrashHandler::Report& report, const std::string& appName = "") {
     using json = nlohmann::json;
     std::uint64_t base = 0, size = 0, instruction = 0;
     const bool native = report.platform == "macOS" && crashDebugId(report.debugId)
-        && crashHexAddress(report.loadAddress, base) && base > 0
-        && crashHexAddress(report.moduleSize, size) && size > 0
+        && crashHex(report.loadAddress, base) && base > 0
+        && crashHex(report.moduleSize, size) && size > 0
         && size <= (std::numeric_limits<std::uint64_t>::max)() - base;
-    const bool haveInstruction = crashHexAddress(report.instructionAddress, instruction) && instruction != 0;
+    const bool haveInstruction = crashHex(report.instructionAddress, instruction) && instruction != 0;
+    const auto legacyFrames = crashFrames(report, appName);
+    if (!native) {
+        json props = {{"frames", legacyFrames}};
+        if (haveInstruction) props["crash_instruction_addr"] = report.instructionAddress;
+        return props;
+    }
     const auto inModule = [&](std::uint64_t pc) { return native && pc >= base && pc - base < size; };
-    struct CapturedFrame { std::string raw, address; std::uint64_t pc; };
+    struct CapturedFrame { json fallback; std::string address; std::uint64_t pc; };
     std::vector<CapturedFrame> captured;
     std::istringstream lines(report.stacktrace);
     std::string line;
+    size_t index = 0;
     while (std::getline(lines, line)) {
-        auto start = line.find("0x");
-        if (start == std::string::npos) start = line.find("0X");
-        if (start == std::string::npos) continue;
-        const auto end = line.find_first_of(" \t\r])", start);
-        const auto address = line.substr(start, end == std::string::npos ? end : end - start);
+        if (line.find("0x") == std::string::npos && line.find("0X") == std::string::npos) continue;
+        const auto fallback = legacyFrames[index++];
+        const auto first = line.find_first_not_of(" \t\r");
+        const auto last = line.find_last_not_of(" \t\r");
+        const auto address = line.substr(first, last - first + 1);
         std::uint64_t pc = 0;
-        if (crashHexAddress(address, pc)) captured.push_back({line, address, pc});
+        // Legacy symbol-rich lines remain custom; never borrow a hex substring.
+        if (crashHex(address, pc)) captured.push_back({fallback, address, pc});
+        else captured.push_back({fallback, "", 0});
     }
     if (native && haveInstruction) {
         // If unwinding crossed the signal trampoline, discard the handler prefix.
@@ -65,22 +117,23 @@ inline nlohmann::json crashFrameProperties(const CrashHandler::Report& report) {
     }
     json frames = json::array();
     bool haveNativeFrame = false;
-    const auto append = [&](const std::string& raw, const std::string& address, std::uint64_t pc) {
+    const auto append = [&](json frame, const std::string& address, std::uint64_t pc) {
         const bool ours = inModule(pc);
-        json frame = {{"platform", ours ? "native" : "custom"}, {"lang", "cpp"},
-                      {"function", raw}, {"in_app", native ? ours : true}, {"resolved", false}};
         if (ours) {
+            frame["platform"] = "native";
             frame["instruction_addr"] = address;
             frame["image_addr"] = report.loadAddress;
             haveNativeFrame = true;
         }
         frames.push_back(std::move(frame));
     };
-    for (const auto& frame : captured) append(frame.raw, frame.address, frame.pc);
+    for (const auto& frame : captured) append(frame.fallback, frame.address, frame.pc);
     // backtrace() writes innermost first; PostHog expects native stacks bottom-up.
     if (native) std::reverse(frames.begin(), frames.end());
     if (native && haveInstruction && (captured.empty() || captured.front().pc != instruction)) {
-        append("fault instruction " + report.instructionAddress, report.instructionAddress, instruction);
+        auto fault = report;
+        fault.stacktrace = report.instructionAddress;
+        append(crashFrames(fault, appName)[0], report.instructionAddress, instruction);
     }
     json props = {{"frames", std::move(frames)}};
     if (haveInstruction) props["crash_instruction_addr"] = report.instructionAddress;
