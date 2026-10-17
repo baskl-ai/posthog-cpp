@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.8.5] - 2026-10-17
+
+### Fixed
+- Reject malformed interrupted-instruction fields without adding a null frame to the event.
+
 ## [1.8.4] - 2026-10-17
 
 ### Fixed

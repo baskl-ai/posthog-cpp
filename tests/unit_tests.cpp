@@ -143,6 +143,13 @@ TEST(crash_fault_instruction) {
     CHECK(props["frames"].size() == 3);
     CHECK(props["frames"][0]["platform"] == "custom");
     CHECK(!props["frames"][0].contains("instruction_addr"));
+    for (const std::string invalid : {"100000080", "0x", "0x100000080junk", "-1"}) {
+        report.instructionAddress = invalid;
+        props = PostHog::detail::crashFrameProperties(report);
+        CHECK(!props.contains("crash_instruction_addr"));
+        CHECK(props["frames"].size() == 3);
+        for (const auto& frame : props["frames"]) CHECK(frame.is_object());
+    }
 }
 
 #ifdef __APPLE__

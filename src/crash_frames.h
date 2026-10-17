@@ -84,7 +84,9 @@ inline nlohmann::json crashFrameProperties(const CrashHandler::Report& report, c
         && crashHex(report.loadAddress, base) && base > 0
         && crashHex(report.moduleSize, size) && size > 0
         && size <= (std::numeric_limits<std::uint64_t>::max)() - base;
-    const bool haveInstruction = crashHex(report.instructionAddress, instruction) && instruction != 0;
+    const bool haveInstruction = (report.instructionAddress.rfind("0x", 0) == 0 ||
+                                  report.instructionAddress.rfind("0X", 0) == 0) &&
+        crashHex(report.instructionAddress, instruction) && instruction != 0;
     const auto legacyFrames = crashFrames(report, appName);
     if (!native) {
         json props = {{"frames", legacyFrames}};
