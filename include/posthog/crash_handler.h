@@ -549,7 +549,7 @@ inline bool install(const std::string& crashDir) {
                             // __PAGEZERO is an unmapped guard. Segment vmaddrs
                             // include the preferred base (0x100000000 for a
                             // typical executable); they are not image sizes.
-                            if (std::strcmp(seg->segname, SEG_PAGEZERO) != 0) {
+                            if (std::strncmp(seg->segname, SEG_PAGEZERO, sizeof(seg->segname)) != 0) {
                                 if (seg->fileoff == 0 && seg->filesize != 0 && seg->vmaddr < preferredBase)
                                     preferredBase = seg->vmaddr;
                                 if (seg->vmsize > (std::numeric_limits<std::uint64_t>::max)() - seg->vmaddr) {

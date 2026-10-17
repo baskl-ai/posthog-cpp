@@ -78,6 +78,7 @@ add_test(NAME crash_report_stability COMMAND ${Python3_EXECUTABLE}
 if(POSTHOG_USE_CURL AND (TARGET libcurl_static OR TARGET CURL::libcurl))
     add_test(NAME crash_report_http COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/test_crash_reports.py $<TARGET_FILE:crash_report_probe> http)
+    set_tests_properties(crash_report_http PROPERTIES TIMEOUT 60)
 endif()
 add_test(NAME symbolize COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_symbolize.py)
 set_tests_properties(crash_frames crash_report_stability symbolize PROPERTIES TIMEOUT 60)

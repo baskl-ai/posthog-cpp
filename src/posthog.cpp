@@ -503,7 +503,7 @@ public:
 
         json stacktrace;
         stacktrace["type"] = "raw";
-        stacktrace["frames"] = detail::crashFrames(report);
+        stacktrace["frames"] = detail::crashFrames(report, config.appName);
         // Preserve the original trace for offline symbolization. Normalized
         // custom frames do not enable server-side native symbolication.
         props["crash_stacktrace"] = report.stacktrace;

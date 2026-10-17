@@ -33,6 +33,9 @@ int main() {
     b.stacktrace = "0x700000000\n0x700000123\n0x700000fff\n";
     const auto relocated = crashFrames(b);
     for (int i = 0; i < 3; ++i) check(relocated[i] == frames[i], "ASLR changes module frame identity");
+    check(crashFrames(a, "plugin_a")[1]["module"] == "plugin_a", "logical module name missing");
+    check(crashFrames(a, "plugin_a")[1] != crashFrames(a, "plugin_b")[1],
+          "different application modules have identical frame inputs");
     b.stacktrace = "0x700000124\n";
     check(crashFrames(b)[0] != frames[1], "different instruction offsets collapsed");
 

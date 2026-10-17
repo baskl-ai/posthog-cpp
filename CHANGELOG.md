@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.7.10] - 2026-10-17
+
+### Fixed
+- Include the logical application module name on normalized crash frames, keeping equal offsets from different plugins distinct in frame inputs.
+- Bound Mach-O segment-name comparisons and the loopback test timeout.
+
 ## [1.7.9] - 2026-10-17
 
 ### Fixed

@@ -29,7 +29,7 @@ inline bool crashHex(const std::string& text, std::uint64_t& value) {
     return true;
 }
 
-inline nlohmann::json crashFrames(const CrashHandler::Report& report) {
+inline nlohmann::json crashFrames(const CrashHandler::Report& report, const std::string& appName = "") {
     std::uint64_t base = 0, size = 0;
     const bool haveRange = crashHex(report.loadAddress, base) && base != 0 &&
         crashHex(report.moduleSize, size) && size != 0 &&
@@ -53,6 +53,7 @@ inline nlohmann::json crashFrames(const CrashHandler::Report& report) {
             std::ostringstream offset;
             offset << "<module>+0x" << std::hex << (address - base);
             frame["function"] = offset.str();
+            if (!appName.empty()) frame["module"] = appName;
         }
         frames.push_back(std::move(frame));
     }

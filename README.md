@@ -126,7 +126,8 @@ unrelated crash grouping and symbolizer limitations.
 ### Crash frame grouping
 
 For the same binary and call path, raw addresses inside a valid recorded module
-range become stable `<module>+0x<offset>` custom frame names. Known outside-module
+range become stable `<module>+0x<offset>` custom frame names, labeled with the
+logical application name in `module`. Known outside-module
 frames keep their raw text and have `in_app=false`. Missing, zero, malformed or
 overflowing ranges retain the legacy frame inputs. The raw trace is also saved in
 `crash_stacktrace`, alongside the original `load_address` event property.
