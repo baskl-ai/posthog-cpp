@@ -112,6 +112,36 @@ TEST(crash_debug_id_format) {
     CHECK(std::string(output) == "12345678-9ABC-DEF0-1234-56789ABCDEF0");
 }
 
+TEST(crash_fault_instruction) {
+    PostHog::CrashHandler::Report report;
+    report.platform = "macOS";
+    report.debugId = "12345678-9ABC-DEF0-1234-56789ABCDEF0";
+    report.loadAddress = "0x100000000";
+    report.moduleSize = "0x1000";
+    report.instructionAddress = "0x100000080";
+    // A handler-only backtrace can miss the real fault site entirely.
+    report.stacktrace = "  0x100000100\n";
+    auto props = PostHog::detail::crashFrameProperties(report);
+    CHECK(props["frames"].back()["instruction_addr"] == report.instructionAddress);
+    CHECK(props["crash_instruction_addr"] == report.instructionAddress);
+    CHECK(PostHog::CrashHandler::hasAddressesFromOurModule(report));
+    // Unwinding reached the interrupted PC: remove the signal-handler prefix.
+    report.stacktrace += "  0x100000080\n  0x100000090\n";
+    props = PostHog::detail::crashFrameProperties(report);
+    CHECK(props["frames"].size() == 2);
+    CHECK(props["frames"][0]["instruction_addr"] == "0x100000090");
+    CHECK(props["frames"].back()["instruction_addr"] == report.instructionAddress);
+    // A memory access address is not an instruction pointer.
+    report.instructionAddress.clear();
+    report.faultAddress = "0x100000080";
+    report.stacktrace = "  0x700000010\n";
+    CHECK(!PostHog::CrashHandler::hasAddressesFromOurModule(report));
+    report.stacktrace = "  Exception at: 0x100000080\n  0x100000080junk\n  0x100000080000000000\n";
+    props = PostHog::detail::crashFrameProperties(report);
+    CHECK(props["frames"].size() == 1);
+    CHECK(props["frames"][0]["instruction_addr"] == "0x100000080");
+}
+
 #ifdef __APPLE__
 TEST(crash_macho_preferred_base) {
     struct Image {
@@ -145,6 +175,11 @@ TEST(crash_macho_preferred_base) {
     image.data.vmaddr = 0x4000;
     PostHog::CrashHandler::Internal::readMachOMetadata(reinterpret_cast<mach_header*>(&image));
     CHECK(PostHog::CrashHandler::Internal::g_moduleSize == 0x6000);
+    // A malformed command must not leave a usable partial UUID/range behind.
+    image.uuid.cmdsize = sizeof(load_command);
+    PostHog::CrashHandler::Internal::readMachOMetadata(reinterpret_cast<mach_header*>(&image));
+    CHECK(PostHog::CrashHandler::Internal::g_moduleSize == 0);
+    CHECK(PostHog::CrashHandler::Internal::g_debugId[0] == '\0');
 }
 #endif
 
@@ -552,6 +587,7 @@ int main() {
     RUN_TEST(crash_native_payload);
     RUN_TEST(crash_legacy_and_invalid_metadata);
     RUN_TEST(crash_debug_id_format);
+    RUN_TEST(crash_fault_instruction);
 #ifdef __APPLE__
     RUN_TEST(crash_macho_preferred_base);
 #endif

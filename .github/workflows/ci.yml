@@ -65,7 +65,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, macos-15-intel]
     name: Build with CURL (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
 
@@ -77,7 +77,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
 
       - name: Configure CMake
-        run: cmake -B build -S . -DPOSTHOG_BUILD_TESTS=ON -DPOSTHOG_USE_CURL=ON
+        run: cmake -B build -S . -DPOSTHOG_BUILD_TESTS=ON -DPOSTHOG_USE_CURL=ON -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build --config Release

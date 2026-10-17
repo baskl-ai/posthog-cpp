@@ -513,6 +513,9 @@ public:
         if (frameProperties.contains("$debug_images")) {
             props["$debug_images"] = std::move(frameProperties["$debug_images"]);
         }
+        if (frameProperties.contains("crash_instruction_addr")) {
+            props["crash_instruction_addr"] = std::move(frameProperties["crash_instruction_addr"]);
+        }
         j["properties"] = props;
 
         QueuedItem req;

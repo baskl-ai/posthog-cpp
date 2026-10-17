@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.8.3] - 2026-10-17
+
+### Fixed
+- Capture the interrupted macOS instruction from the signal context separately from the accessed memory address, so a handler-only backtrace does not lose the fault site.
+- Preserve saved-session metadata across relaunches; add the missing fault-site frame and remove handler frames when unwinding reaches the interrupted PC.
+- Reject malformed address tokens and incomplete Mach-O metadata without retaining a partial UUID/range.
+
+### Tests
+- Crash optimized, stripped executable and plugin fixtures, consume their real saved reports through the HTTP sender, and resolve emitted fault/terminate addresses against matching dSYMs. Exercise both macOS architectures in CI.
+
 ## [1.8.2] - 2026-10-06
 
 ### Fixed

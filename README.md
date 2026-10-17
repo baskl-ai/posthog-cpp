@@ -134,6 +134,18 @@ Host/system-library frames keep their raw custom format because this SDK only
 captures metadata for its own module. Handled `trackException()` events use a
 separate path.
 
+On macOS arm64/x86_64, signal reports save the interrupted instruction separately
+from `FAULT_ADDR` (the memory address being accessed). The interrupted PC remains
+available even if unwinding stops inside the crash handler. When unwinding reaches
+that PC, handler frames are removed from the native stack. Otherwise the saved PC
+is appended as the fault-site frame, alongside the best-effort handler stack.
+
+Module attribution still has a legacy stack-count heuristic. A captured PC inside
+the plugin confirms that location; a report containing only handler frames does
+not prove the plugin caused the crash. In particular, these changes do not make
+SIGABRT counts reliable measures of plugin faults or provide a complete signal-
+context unwind. Crash capture remains best effort and does not fix crashes.
+
 Baskl's companion upload workflow is
 [ai-machine#59](https://github.com/baskl-ai/ai-machine/pull/59). It requires
 `POSTHOG_CLI_API_KEY` (a personal key permitted to upload symbols) and
