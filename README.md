@@ -103,60 +103,93 @@ Based on `config.appName`:
 ### How It Works
 
 1. **Crash occurs** → signal handler saves raw addresses to `pending_crash.txt`
-2. **Next launch** → `installCrashHandler()` detects the file, normalizes each in-module
-   frame to a stable module-relative offset (`<module>+0x…`), and sends an `$exception`
-   event with an explicit `$exception_fingerprint`
-3. **PostHog** → shows the crash in Error Tracking, grouped correctly across launches
+2. **Next launch** → `installCrashHandler()` detects the file and sends `$exception` event
+3. **PostHog** → shows crash in Error Tracking
 
-#### Grouping across launches
+### Windows crash capture
 
-Frame addresses are captured as absolute runtime addresses, but ASLR loads the module at a
-different base on every launch — so the raw addresses differ each time and every crash would
-otherwise become a brand-new Error Tracking issue. Before sending, the SDK subtracts the
-module `load_address` from any frame inside the module range, turning it into an
-ASLR-independent offset, and sets `$exception_fingerprint` from the signal type plus those
-offsets. Identical crashes now dedupe into a single issue. Frames outside the module (system
-libraries) are left untouched.
+The Windows exception filter admits one writer per SDK module and saves the
+exception code, full-width instruction address, and module metadata before
+attempting stack capture. Recursive or competing entries return immediately;
+additional frames are appended without replacing that initial report. A fault
+inside stack capture can therefore leave a minimal report with just the original
+instruction address. Reports whose faulting instruction belongs to our module
+remain eligible for upload even without additional frames.
+
+The filter avoids heap allocation, CRT formatting, and DbgHelp symbol lookup.
+Capture is still best effort: invalid stacks, process corruption, or failed file
+I/O can prevent a complete report. Return addresses come from the handler thread,
+not an unwind of the supplied exception context. Offline symbolization requires
+the matching binary/debug symbols; this change does not add a minidump or fix
+unrelated crash grouping and symbolizer limitations.
+
+### Crash frame grouping
+
+For the same binary and call path, raw addresses inside a valid recorded module
+range become stable `<module>+0x<offset>` custom frame names. Known outside-module
+frames keep their raw text and have `in_app=false`. Missing, zero, malformed or
+overflowing ranges retain the legacy frame inputs. The raw trace is also saved in
+`crash_stacktrace`, alongside the original `load_address` event property.
+
+This removes ASLR variation from in-module frame names. It does not set
+`$exception_fingerprint`: PostHog's automatic grouping and project grouping rules
+still apply. Exception messages (including fault addresses), external frames,
+different builds and incomplete stacks can still affect grouping. This neither
+repairs historical issues nor changes which crashes the SDK attributes to a
+plugin; handler-only stacks remain an attribution limitation. Offsets are not
+resolved function names and do not enable native server-side symbolication
+(the separate work in PR #7).
 
 ### Symbolization
 
-Crash frames are sent as module-relative offsets (`<module>+0x…`), which can be symbolized
-directly against the binary — no load address needed:
+Prefer a full event JSON (or its properties object). The script uses its original
+raw trace and load address:
 
 ```bash
-python scripts/symbolize.py \
-    --json exception_list.json \
-    --binary /path/to/MyApp
+python scripts/symbolize.py --json event.json --binary /path/to/MyApp
 ```
 
-Legacy events (bare absolute addresses) still work by supplying the load address:
+A copied `$exception_list`, including a mixture of normalized and legacy raw
+frames, still needs the original event's load address:
 
 ```bash
-python scripts/symbolize.py \
-    --addr 0x104507698 \
-    --load-addr 0x104504000 \
-    --binary /path/to/MyApp
+python scripts/symbolize.py --json exception_list.json \
+    --load-addr 0x104504000 --binary /path/to/MyApp
 ```
 
-**Requirements:**
-- Original executable (same build that crashed)
-- Debug symbols: `.dSYM` (macOS), `.pdb` (Windows), or debug build (Linux)
-- Load address from crash report (`load_address` property in PostHog) — only for legacy events
+The symbolizer reconstructs each relative frame's runtime address separately;
+it does not treat system-library addresses as module offsets. Without a load
+address it reports that normalized frames need one, rather than guessing a
+Mach-O preferred base. As before, resolving system-library frames needs their
+own binaries and load addresses.
 
-**Output:**
-```
-0x104507698 -> main (main.cpp:42)
-0x104505bf4 -> processData (processor.cpp:128)
-```
+Requirements: the matching executable and debug symbols (`.dSYM` on macOS,
+`.pdb` on Windows, or a debug build on Linux). A raw crash file also works with
+`--crash pending_crash.txt`; legacy absolute-address events remain supported.
 
 ### Runtime Exceptions vs Crashes
 
 |                      | `trackException()`  | Crash Handler              |
 |----------------------|---------------------|----------------------------|
 | **When**             | Runtime (try/catch) | Signal (SIGSEGV, etc.)     |
-| **Function names**   | ✅ Resolved         | ❌ Offsets only (symbolize) |
+| **Function names**   | ✅ Resolved         | ❌ Addresses only           |
 | **Line numbers**     | ❌ No               | ❌ No (needs symbolization) |
 | **Sent immediately** | ✅ Yes              | ❌ Next launch              |
+
+### Handled-exception grouping
+
+`trackException()` uses symbol names when available and `<module>+0x<offset>`
+with a module basename otherwise. Offsets are stable across ASLR relocations of
+**the same binary**, not necessarily across builds or different call paths.
+Frames with no module base use `(unknown)`; they cannot distinguish locations.
+On macOS/Linux, `dladdr` binary paths are reduced to basenames to avoid grouping
+by installation directory. Address-only frames have `resolved=false`.
+
+These are PostHog `custom` frames, which the server passes through; marking a
+frame unresolved does **not** enable native symbolication. Grouping still depends
+on PostHog's grouping algorithm, exception text, and any custom rules. This fixes
+unstable frame inputs, not historical issues or every source of grouping noise.
+The crash-reporting path is separate.
 
 ## Privacy and Opt-Out
 

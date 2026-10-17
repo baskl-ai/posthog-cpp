@@ -1,0 +1,27 @@
+set(crash_dir "${CMAKE_CURRENT_BINARY_DIR}/terminate_${SCENARIO}")
+file(REMOVE_RECURSE "${crash_dir}")
+file(MAKE_DIRECTORY "${crash_dir}")
+if(SCENARIO STREQUAL "open_failure")
+    file(MAKE_DIRECTORY "${crash_dir}/pending_crash.txt")
+elseif(SCENARIO STREQUAL "write_failure")
+    file(CREATE_LINK /dev/full "${crash_dir}/pending_crash.txt" SYMBOLIC)
+endif()
+
+execute_process(COMMAND "${PROGRAM}" crash "${SCENARIO}" "${crash_dir}"
+                RESULT_VARIABLE crash_result TIMEOUT 15)
+if(SCENARIO MATCHES "_failure$")
+    if(NOT "${crash_result}" STREQUAL "42")
+        message(FATAL_ERROR "failed write suppressed abort fallback: ${crash_result}")
+    endif()
+else()
+    # CMake returns a platform-specific description for abnormal termination.
+    if("${crash_result}" STREQUAL "0" OR "${crash_result}" MATCHES "[Tt]imeout")
+        message(FATAL_ERROR "child did not crash as expected: ${crash_result}")
+    endif()
+    execute_process(COMMAND "${PROGRAM}" verify "${SCENARIO}" "${crash_dir}"
+                    RESULT_VARIABLE verify_result TIMEOUT 15)
+    if(NOT "${verify_result}" STREQUAL "0")
+        message(FATAL_ERROR "next-launch report check failed: ${verify_result}")
+    endif()
+endif()
+file(REMOVE_RECURSE "${crash_dir}")

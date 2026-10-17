@@ -1,14 +1,81 @@
 # Changelog
 
-## [1.7.2] - 2026-07-20
+## [1.7.9] - 2026-10-17
 
 ### Fixed
-- Crash reports now group correctly in PostHog Error Tracking. Frame addresses inside the
-  module are normalized to stable, ASLR-independent module-relative offsets (`<module>+0x…`)
-  and an explicit `$exception_fingerprint` is set, so the same crash dedupes into one issue
-  instead of spawning a new issue on every launch
-- `scripts/symbolize.py` recognizes the module-relative offset format and symbolizes it
-  directly (no load address needed); legacy absolute-address events still work
+- Use stable module-relative names for raw crash frames inside a validated module range; mark known outside-module frames as external. Keep PostHog automatic grouping and configured rules, without a custom fingerprint override.
+- Preserve the raw stack in `crash_stacktrace` for offline symbolization; accept full event JSON and mixed relative/raw frame lists in the symbolizer. Relative frames still require the original load address.
+- Capture the Linux loaded-image span and exclude the Mach-O preferred base and `__PAGEZERO` from macOS image sizes.
+
+### Tests
+- Cover malformed/overflowing ranges, address boundaries, relocation, legacy frames, mixed symbolizer inputs, real crash/next-launch traces, and complete events over loopback HTTP.
+
+## [1.7.8] - 2026-09-29
+
+### Changed
+- Integrate the concurrently merged handled-exception ASLR and installation-path normalization changes, retaining both crash-report preservation and stacktrace stability regressions.
+
+## [1.7.7] - 2026-09-29
+
+### Fixed
+- Check Windows native-writer re-entry before inspecting exception pointers or dispatching to the previous filter, preserving PR #11's recursive and concurrent entry protection.
+
+## [1.7.6] - 2026-09-29
+
+### Fixed
+- Preserve successfully written TERMINATE records when abort invokes a second crash handler, keeping the exception message separate from the stack trace and exposing it in error descriptions.
+- Chain the previous Windows filter for MSVC C++ exceptions so the runtime reaches the terminate hook with the active exception; retain native reporting when no previous filter exists.
+- Capture raw terminate frames on Windows and Unix. Use a shared lock-free atomic preservation flag; retain abort fallback on file or stream setup failure.
+- Copy bounded exception messages while the exception is alive, flatten line breaks, and preserve UTF-8 character boundaries. Exception class names are not captured.
+- Integrate the Windows report integrity and pointer-width fixes from PR #11 without replacing its re-entry guard or fallback writer.
+
+### Tests
+- Add isolated crash/next-launch regressions for standard, unknown, and explicit termination; empty, long, multiline, and UTF-8 messages; failed writes; ordinary aborts; and Windows native/fallback handling.
+
+## [1.7.5] - 2026-09-29
+
+### Fixed
+- Retain the Windows crash-handler fixes and regression tests merged separately in 1.7.3.
+- Use Windows platform unwinding for structured handled-exception stacks; preserve
+  stable module-relative offsets and truthful resolution flags from 1.7.4.
+- Strip the optimized regression fixture explicitly on Unix platforms so macOS
+  local symbols cannot bypass the address-only path under test.
+- Reconcile the original PR's provisional 1.7.3 notes with the released crash-fix
+  history; this SDK does not enable PostHog native symbolication for custom frames.
+
+## [1.7.4] - 2026-09-29
+
+### Fixed
+- Complete handled-exception ASLR normalization: unresolved frames use module-relative
+  offsets, unknown-module frames use a stable placeholder, and binary paths use
+  basenames so installation directories do not change grouping.
+- Preserve real resolution flags in the exception payload. Custom frames are passed
+  through by PostHog; this does not enable native server-side symbolication.
+- Validate frame capture limits and safely handle long Windows module paths.
+- Add deterministic relocation/payload tests and optimized symbol-free capture tests
+  across processes, installation directories, and distinct call sites.
+- Synchronize the CMake package version with the SDK header.
+
+## [1.7.3] - 2026-09-29
+
+### Fixed
+- Preserve full-width Windows instruction, stack, and module addresses when writing raw crash reports.
+- Save the exception code and faulting instruction before best-effort stack capture, then append frames without truncating the fallback report.
+- Keep the crash buffer and re-entry guard shared across translation units; recursive and competing filter entries leave the first report alone.
+- Retain a Windows fallback report when its faulting instruction belongs to our module, even if stack capture fails.
+- Use bounded formatting and the Windows clock API in the exception filter, without heap allocation, CRT formatting, or DbgHelp lookups.
+
+### Tests
+- Add Windows regression coverage for full-width report parsing, nested and concurrent entry, cross-translation-unit state, interrupted stack capture, and an actual unhandled exception.
+- Run CI for pull requests and main pushes as well as tags and manual runs.
+
+## [1.7.2] - 2026-09-08
+
+### Fixed
+- Windows crash reports were corrupted when the exception filter ran twice. A fault inside the handler rewound the shared buffer and mixed a second report into the first, so the stack text could not be symbolicated.
+- The filter now sets a re-entry guard on entry. A second entry returns at once and leaves the first report intact.
+- The filter no longer calls `malloc`, `sprintf`, or DbgHelp while the process faults. These calls are not safe in that state and could make the handler crash inside itself. The filter now writes raw addresses with the same async-safe helpers as the Unix path.
+- Resolve Windows crash addresses to function names offline with `scripts/symbolize.py`, the same way as before for Unix crashes.
 
 ## [1.7.1] - 2026-02-27
 

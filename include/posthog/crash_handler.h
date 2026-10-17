@@ -30,17 +30,16 @@
 #include <ctime>
 #include <cstring>
 #include <cstdlib>
-#include <cstdio>
-#include <cctype>
+#include <csignal>
+#include <atomic>
+#include <cstdint>
 #include <deque>
-#include <vector>
+#include <limits>
 
 #ifdef _WIN32
 #include <windows.h>
-#include <dbghelp.h>
 #include <shlobj.h>
 #include <psapi.h>
-#pragma comment(lib, "dbghelp.lib")
 #pragma comment(lib, "psapi.lib")
 #else
 #include <signal.h>
@@ -49,6 +48,9 @@
 #include <execinfo.h>
 #include <sys/stat.h>
 #include <dlfcn.h>
+#ifdef __linux__
+#include <link.h>
+#endif
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
@@ -67,6 +69,7 @@ struct Report {
     std::string faultAddress;    ///< Address that caused the crash (if available)
     std::string timestamp;       ///< When crash occurred (unix timestamp)
     std::string stacktrace;      ///< Raw stacktrace
+    std::string message;         ///< Exception message (uncaught C++ exception via std::terminate)
     std::string platform;        ///< OS info
     std::string loadAddress;     ///< Load address for symbolication
     std::string moduleSize;      ///< Size of our module (for address range filtering)
@@ -91,12 +94,19 @@ struct LogFileConfig {
 };
 
 namespace Internal {
-    static char g_crashFilePath[512] = {0};
-    static char g_crashBuffer[8192] = {0};
-    static bool g_installed = false;
-    static unsigned long g_loadAddress = 0;
-    static unsigned long g_moduleSize = 0;  // Size of our module for address filtering
-    static char g_execPath[512] = {0};
+    inline char g_crashFilePath[512] = {0};
+    inline char g_crashBuffer[8192] = {0};
+    inline bool g_installed = false;
+    inline std::uintptr_t g_loadAddress = 0;
+    inline std::size_t g_moduleSize = 0;  // Size of our module for address filtering
+    inline char g_execPath[512] = {0};
+    // Set by the std::terminate hook right before it calls std::abort(). It tells the
+    // SIGABRT handler that a full TERMINATE record (with the exception message) is
+    // already on disk, so the handler must not truncate and overwrite it.
+    // Lock-free atomics can be read in a signal handler and across crashing threads.
+    static_assert(std::atomic<bool>::is_always_lock_free,
+                  "Crash reporting requires lock-free bool atomics");
+    inline std::atomic<bool> g_terminateHandled{false};
 
     inline void safeCopy(char* dest, const char* src, size_t maxLen) {
         size_t i = 0;
@@ -107,7 +117,7 @@ namespace Internal {
         dest[i] = '\0';
     }
 
-    inline void safeItoa(long value, char* buffer, size_t bufferSize) {
+    inline void safeItoa(std::int64_t value, char* buffer, size_t bufferSize) {
         if (bufferSize == 0) return;
 
         char temp[32];
@@ -130,7 +140,7 @@ namespace Internal {
         buffer[j] = '\0';
     }
 
-    inline void safeUlongToHex(unsigned long value, char* buffer, size_t bufferSize) {
+    inline void safeUlongToHex(std::uintptr_t value, char* buffer, size_t bufferSize) {
         if (bufferSize < 3) return;
 
         buffer[0] = '0';
@@ -174,6 +184,16 @@ namespace Internal {
 #ifndef _WIN32
     inline void signalHandlerWithInfo(int sig, siginfo_t* info, void* ucontext) {
         (void)ucontext;  // Unused for now
+
+        // An uncaught C++ exception routes through std::terminate, which already wrote
+        // a full TERMINATE record (with the exception message) before calling
+        // std::abort(). Do not overwrite that record with a message-less SIGABRT one.
+        if (sig == SIGABRT && g_terminateHandled.load(std::memory_order_relaxed)) {
+            signal(sig, SIG_DFL);
+            raise(sig);
+            return;
+        }
+
         char* ptr = g_crashBuffer;
         size_t remaining = sizeof(g_crashBuffer);
 
@@ -204,7 +224,7 @@ namespace Internal {
             remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
 
             char addrStr[32];
-            safeUlongToHex(reinterpret_cast<unsigned long>(info->si_addr), addrStr, sizeof(addrStr));
+            safeUlongToHex(reinterpret_cast<std::uintptr_t>(info->si_addr), addrStr, sizeof(addrStr));
             safeCopy(ptr, addrStr, remaining);
             ptr += strlen(ptr);
             remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
@@ -257,7 +277,7 @@ namespace Internal {
         int frameCount = backtrace(frames, 32);
 
         for (int i = 0; i < frameCount && remaining > 64; i++) {
-            unsigned long addr = reinterpret_cast<unsigned long>(frames[i]);
+            std::uintptr_t addr = reinterpret_cast<std::uintptr_t>(frames[i]);
             char hexChars[] = "0123456789abcdef";
             int j = 0;
             char temp[20];
@@ -292,177 +312,126 @@ namespace Internal {
 #endif
 
 #ifdef _WIN32
-    inline LONG WINAPI exceptionFilter(EXCEPTION_POINTERS* exceptionInfo) {
-        char* ptr = g_crashBuffer;
-        size_t remaining = sizeof(g_crashBuffer);
+    inline LPTOP_LEVEL_EXCEPTION_FILTER g_previousExceptionFilter = nullptr;
 
-        safeCopy(ptr, "SIGNAL: EXCEPTION\n", remaining);
-        ptr += strlen(ptr);
-        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+    // One writer for the lifetime of this installation. Never wait on a faulting
+    // thread or reset on exit: a later exception must not replace the first one.
+    inline volatile LONG g_exceptionFilterEntered = 0;
 
-        safeCopy(ptr, "CODE: 0x", remaining);
-        ptr += strlen(ptr);
-        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+    struct WindowsCrashWriter {
+        size_t size = 0;
 
-        DWORD code = exceptionInfo->ExceptionRecord->ExceptionCode;
-        char codeStr[16];
-        sprintf(codeStr, "%08lX", code);
-        safeCopy(ptr, codeStr, remaining);
-        ptr += strlen(ptr);
-        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-        safeCopy(ptr, "\nFAULT_ADDR: 0x", remaining);
-        ptr += strlen(ptr);
-        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-        PVOID faultAddr = exceptionInfo->ExceptionRecord->ExceptionAddress;
-        char faultAddrStr[32];
-        sprintf(faultAddrStr, "%p", faultAddr);
-        safeCopy(ptr, faultAddrStr, remaining);
-        ptr += strlen(ptr);
-        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-        safeCopy(ptr, "\nTIME: ", remaining);
-        ptr += strlen(ptr);
-        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-        time_t now = time(nullptr);
-        char timeStr[32];
-        safeItoa(static_cast<long>(now), timeStr, sizeof(timeStr));
-        safeCopy(ptr, timeStr, remaining);
-        ptr += strlen(ptr);
-        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-        safeCopy(ptr, "\nLOAD_ADDR: ", remaining);
-        ptr += strlen(ptr);
-        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-        char loadAddrStr[32];
-        safeUlongToHex(g_loadAddress, loadAddrStr, sizeof(loadAddrStr));
-        safeCopy(ptr, loadAddrStr, remaining);
-        ptr += strlen(ptr);
-        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-        safeCopy(ptr, "\nMODULE_SIZE: ", remaining);
-        ptr += strlen(ptr);
-        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-        char moduleSizeStr[32];
-        safeUlongToHex(g_moduleSize, moduleSizeStr, sizeof(moduleSizeStr));
-        safeCopy(ptr, moduleSizeStr, remaining);
-        ptr += strlen(ptr);
-        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-        safeCopy(ptr, "\nEXEC_PATH: ", remaining);
-        ptr += strlen(ptr);
-        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-        safeCopy(ptr, g_execPath, remaining);
-        ptr += strlen(ptr);
-        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-        safeCopy(ptr, "\nSTACKTRACE:\n", remaining);
-        ptr += strlen(ptr);
-        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-        // Exception address
-        safeCopy(ptr, "  Exception at: 0x", remaining);
-        ptr += strlen(ptr);
-        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-        char addrStr[32];
-        sprintf(addrStr, "%p\n", exceptionInfo->ExceptionRecord->ExceptionAddress);
-        safeCopy(ptr, addrStr, remaining);
-        ptr += strlen(ptr);
-        remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-        // Capture stack trace using CaptureStackBackTrace
-        void* stack[64];
-        WORD frames = CaptureStackBackTrace(0, 64, stack, NULL);
-
-        // Try to symbolize with DbgHelp (best effort)
-        HANDLE process = GetCurrentProcess();
-        SYMBOL_INFO* symbol = (SYMBOL_INFO*)malloc(sizeof(SYMBOL_INFO) + 256);
-        if (symbol) {
-            symbol->MaxNameLen = 255;
-            symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
-        }
-
-        IMAGEHLP_LINE64 line;
-        line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
-
-        for (WORD i = 0; i < frames && remaining > 80; i++) {
-            safeCopy(ptr, "  ", remaining);
-            ptr += strlen(ptr);
-            remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-            // Try to get symbol name
-            if (symbol && SymFromAddr(process, (DWORD64)stack[i], 0, symbol)) {
-                // Got symbol name
-                safeCopy(ptr, symbol->Name, remaining);
-                ptr += strlen(ptr);
-                remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-                // Try to get file and line
-                DWORD displacement = 0;
-                if (SymGetLineFromAddr64(process, (DWORD64)stack[i], &displacement, &line)) {
-                    safeCopy(ptr, " (", remaining);
-                    ptr += strlen(ptr);
-                    remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-                    // Extract filename from full path
-                    const char* filename = line.FileName;
-                    const char* lastSlash = strrchr(filename, '\\');
-                    if (lastSlash) filename = lastSlash + 1;
-
-                    safeCopy(ptr, filename, remaining);
-                    ptr += strlen(ptr);
-                    remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-                    safeCopy(ptr, ":", remaining);
-                    ptr += strlen(ptr);
-                    remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-                    char lineStr[16];
-                    safeItoa(line.LineNumber, lineStr, sizeof(lineStr));
-                    safeCopy(ptr, lineStr, remaining);
-                    ptr += strlen(ptr);
-                    remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-                    safeCopy(ptr, ")", remaining);
-                    ptr += strlen(ptr);
-                    remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-                }
-
-                safeCopy(ptr, " [0x", remaining);
-                ptr += strlen(ptr);
-                remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
-
-                sprintf(addrStr, "%p]\n", stack[i]);
-                safeCopy(ptr, addrStr, remaining);
-            } else {
-                // Symbol not found, just print address
-                sprintf(addrStr, "0x%p\n", stack[i]);
-                safeCopy(ptr, addrStr, remaining);
+        void append(const char* text) {
+            while (*text && size + 1 < sizeof(g_crashBuffer)) {
+                g_crashBuffer[size++] = *text++;
             }
-
-            ptr += strlen(ptr);
-            remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+            g_crashBuffer[size] = '\0';
         }
 
-        if (symbol) {
-            free(symbol);
+        void hex(std::uintptr_t value) {
+            char text[2 + sizeof(value) * 2 + 1];
+            safeUlongToHex(value, text, sizeof(text));
+            append(text);
+        }
+    };
+
+    inline bool writeWindowsCrashFile(const char* data, size_t size, bool append) {
+        HANDLE file = CreateFileA(g_crashFilePath,
+            append ? FILE_APPEND_DATA : GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+            append ? OPEN_EXISTING : CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return false;
+
+        bool success = true;
+        while (size > 0) {
+            DWORD written = 0;
+            if (!WriteFile(file, data, static_cast<DWORD>(size), &written, nullptr)
+                || written == 0) {
+                success = false;
+                break;
+            }
+            data += written;
+            size -= written;
+        }
+        CloseHandle(file);
+        return success;
+    }
+
+    // The capture function is supplied separately so interrupted/re-entrant
+    // capture can be exercised without provoking undefined behavior in tests.
+    inline LONG writeWindowsException(EXCEPTION_POINTERS* exceptionInfo,
+        USHORT (WINAPI *captureStack)(ULONG, ULONG, PVOID*, PULONG)) {
+        if (InterlockedExchange(&g_exceptionFilterEntered, 1) != 0) {
+            return EXCEPTION_CONTINUE_SEARCH;
         }
 
-        HANDLE hFile = CreateFileA(g_crashFilePath, GENERIC_WRITE, 0, NULL,
-                                    CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile != INVALID_HANDLE_VALUE) {
-            DWORD written;
-            WriteFile(hFile, g_crashBuffer, (DWORD)strlen(g_crashBuffer), &written, NULL);
-            CloseHandle(hFile);
+        WindowsCrashWriter report;
+        report.append("SIGNAL: EXCEPTION\nCODE: ");
+        report.hex(exceptionInfo->ExceptionRecord->ExceptionCode);
+        report.append("\nFAULT_ADDR: ");
+        const auto fault = reinterpret_cast<std::uintptr_t>(
+            exceptionInfo->ExceptionRecord->ExceptionAddress);
+        report.hex(fault);
+        report.append("\nTIME: ");
+        FILETIME now;
+        GetSystemTimeAsFileTime(&now);
+        ULARGE_INTEGER ticks;
+        ticks.LowPart = now.dwLowDateTime;
+        ticks.HighPart = now.dwHighDateTime;
+        char timestamp[32];
+        safeItoa(static_cast<std::int64_t>(ticks.QuadPart / 10000000ULL)
+            - 11644473600LL, timestamp, sizeof(timestamp));
+        report.append(timestamp);
+        report.append("\nLOAD_ADDR: ");
+        report.hex(g_loadAddress);
+        report.append("\nMODULE_SIZE: ");
+        report.hex(g_moduleSize);
+        report.append("\nEXEC_PATH: ");
+        report.append(g_execPath);
+        report.append("\nSTACKTRACE:\n  ");
+        report.hex(fault);
+        report.append("\n");
+
+        // Preserve the exception record before best-effort stack capture. A
+        // nested fault may terminate the process rather than resume this filter.
+        const size_t saved = report.size;
+        if (!writeWindowsCrashFile(g_crashBuffer, saved, false)) {
+            return EXCEPTION_CONTINUE_SEARCH;
         }
 
+        // These are handler-thread return addresses, not a context unwind from
+        // the fault. Keep the original instruction address above as frame zero.
+        // No heap allocation, CRT formatting, or DbgHelp symbol lookup here.
+        void* stack[64];
+        const WORD frames = captureStack(0, 64, stack, nullptr);
+        for (WORD i = 0; i < frames; ++i) {
+            report.append("  ");
+            report.hex(reinterpret_cast<std::uintptr_t>(stack[i]));
+            report.append("\n");
+        }
+        // Append only: losing the optional frames must not erase the fallback.
+        writeWindowsCrashFile(g_crashBuffer + saved, report.size - saved, true);
         return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    inline LONG WINAPI exceptionFilter(EXCEPTION_POINTERS* exceptionInfo) {
+        // The std::terminate hook already wrote a full TERMINATE record with the
+        // exception message. Keep it instead of overwriting with the abort exception.
+        if (g_terminateHandled.load(std::memory_order_relaxed) ||
+            InterlockedCompareExchange(&g_exceptionFilterEntered, 0, 0) != 0) {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        // The MSVC runtime's filter routes uncaught C++ exceptions through
+        // std::terminate with current_exception() populated. Replacing that
+        // filter without chaining it bypasses our message capture entirely.
+        // Other native faults, or a missing previous filter, use our raw report.
+        constexpr DWORD msvcExceptionCode = 0xe06d7363;
+        if (exceptionInfo->ExceptionRecord->ExceptionCode == msvcExceptionCode &&
+            g_previousExceptionFilter) {
+            return g_previousExceptionFilter(exceptionInfo);
+        }
+
+        return writeWindowsException(exceptionInfo, CaptureStackBackTrace);
     }
 #endif
 
@@ -533,19 +502,14 @@ inline bool install(const std::string& crashDir) {
     GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                        reinterpret_cast<LPCSTR>(&install), &hModule);
     if (hModule) {
-        Internal::g_loadAddress = reinterpret_cast<unsigned long>(hModule);
+        Internal::g_loadAddress = reinterpret_cast<std::uintptr_t>(hModule);
         MODULEINFO modInfo;
         if (GetModuleInformation(GetCurrentProcess(), hModule, &modInfo, sizeof(modInfo))) {
             Internal::g_moduleSize = modInfo.SizeOfImage;
         }
     } else {
-        Internal::g_loadAddress = reinterpret_cast<unsigned long>(GetModuleHandle(NULL));
+        Internal::g_loadAddress = reinterpret_cast<std::uintptr_t>(GetModuleHandle(NULL));
     }
-
-    // Initialize symbol handler for better stack traces (best effort, ignore errors)
-    HANDLE process = GetCurrentProcess();
-    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
-    SymInitialize(process, NULL, TRUE);
 #else
     mkdir(crashDir.c_str(), 0755);
     std::string crashFile = crashDir + "/pending_crash.txt";
@@ -564,7 +528,7 @@ inline bool install(const std::string& crashDir) {
 
     Dl_info info;
     if (dladdr(reinterpret_cast<void*>(&install), &info)) {
-        Internal::g_loadAddress = reinterpret_cast<unsigned long>(info.dli_fbase);
+        Internal::g_loadAddress = reinterpret_cast<std::uintptr_t>(info.dli_fbase);
 
         // Get module size by finding the loaded image
 #ifdef __APPLE__
@@ -576,20 +540,56 @@ inline bool install(const std::string& crashDir) {
                 if (header->magic == MH_MAGIC_64) {
                     const struct mach_header_64* header64 = reinterpret_cast<const struct mach_header_64*>(header);
                     const struct load_command* cmd = reinterpret_cast<const struct load_command*>(header64 + 1);
+                    std::uint64_t preferredBase = (std::numeric_limits<std::uint64_t>::max)();
+                    std::uint64_t imageEnd = 0;
+                    bool valid = true;
                     for (uint32_t j = 0; j < header64->ncmds; j++) {
                         if (cmd->cmd == LC_SEGMENT_64) {
                             const struct segment_command_64* seg = reinterpret_cast<const struct segment_command_64*>(cmd);
-                            unsigned long segEnd = seg->vmaddr + seg->vmsize;
-                            if (segEnd > Internal::g_moduleSize) {
-                                Internal::g_moduleSize = segEnd;
+                            // __PAGEZERO is an unmapped guard. Segment vmaddrs
+                            // include the preferred base (0x100000000 for a
+                            // typical executable); they are not image sizes.
+                            if (std::strcmp(seg->segname, SEG_PAGEZERO) != 0) {
+                                if (seg->fileoff == 0 && seg->filesize != 0 && seg->vmaddr < preferredBase)
+                                    preferredBase = seg->vmaddr;
+                                if (seg->vmsize > (std::numeric_limits<std::uint64_t>::max)() - seg->vmaddr) {
+                                    valid = false;
+                                } else if (seg->vmaddr + seg->vmsize > imageEnd) {
+                                    imageEnd = seg->vmaddr + seg->vmsize;
+                                }
                             }
                         }
                         cmd = reinterpret_cast<const struct load_command*>(reinterpret_cast<const char*>(cmd) + cmd->cmdsize);
                     }
+                    if (valid && imageEnd > preferredBase &&
+                        imageEnd - preferredBase <= (std::numeric_limits<std::size_t>::max)())
+                        Internal::g_moduleSize = static_cast<std::size_t>(imageEnd - preferredBase);
                 }
                 break;
             }
         }
+#elif defined(__linux__)
+        // Resolve the image while it is loaded. The next process cannot dladdr
+        // addresses belonging to the crashed process's ASLR layout.
+        dl_iterate_phdr([](struct dl_phdr_info* image, std::size_t, void*) {
+            const auto base = Internal::g_loadAddress;
+            std::uintptr_t end = 0;
+            bool containsModule = false;
+            for (std::size_t i = 0; i < image->dlpi_phnum; ++i) {
+                const auto& segment = image->dlpi_phdr[i];
+                if (segment.p_type != PT_LOAD) continue;
+                const auto limit = (std::numeric_limits<std::uintptr_t>::max)();
+                if (segment.p_vaddr > limit - image->dlpi_addr) return 0;
+                const auto start = image->dlpi_addr + segment.p_vaddr;
+                if (segment.p_memsz > limit - start) return 0;
+                const auto segmentEnd = start + segment.p_memsz;
+                if (base >= start && base < segmentEnd) containsModule = true;
+                if (segmentEnd > end) end = segmentEnd;
+            }
+            if (!containsModule || end <= base) return 0;
+            Internal::g_moduleSize = end - base;
+            return 1;
+        }, nullptr);
 #endif
     }
 #endif
@@ -597,7 +597,10 @@ inline bool install(const std::string& crashDir) {
     Internal::safeCopy(Internal::g_crashFilePath, crashFile.c_str(), sizeof(Internal::g_crashFilePath));
 
 #ifdef _WIN32
-    SetUnhandledExceptionFilter(Internal::exceptionFilter);
+    auto previousFilter = SetUnhandledExceptionFilter(Internal::exceptionFilter);
+    if (previousFilter != Internal::exceptionFilter) {
+        Internal::g_previousExceptionFilter = previousFilter;
+    }
 #else
     struct sigaction sa;
     sa.sa_sigaction = Internal::signalHandlerWithInfo;
@@ -612,28 +615,66 @@ inline bool install(const std::string& crashDir) {
 #endif
 
     std::set_terminate([]() {
-        const char* msg = "std::terminate called";
+        char msg[1024] = "std::terminate called";
         try {
             if (auto eptr = std::current_exception()) {
                 std::rethrow_exception(eptr);
             }
         } catch (const std::exception& e) {
-            msg = e.what();
+            // Copy while the exception is alive; avoid allocating another string
+            // when termination itself may have been caused by allocation failure.
+            const char* what = e.what();
+            Internal::safeCopy(msg, what, sizeof(msg));
+            size_t length = std::strlen(msg);
+            if (length == sizeof(msg) - 1 && what[length] != '\0') {
+                // Do not split a UTF-8 character at the message limit: a broken
+                // suffix would make next-launch JSON serialization fail.
+                while (length > 0 && (static_cast<unsigned char>(what[length]) & 0xc0) == 0x80) {
+                    --length;
+                }
+                msg[length] = '\0';
+            }
         } catch (...) {
-            msg = "Unknown exception";
+            Internal::safeCopy(msg, "Unknown exception", sizeof(msg));
         }
 
-        std::ofstream f(Internal::g_crashFilePath);
-        if (f.is_open()) {
-            f << "SIGNAL: TERMINATE\n";
-            f << "TIME: " << time(nullptr) << "\n";
-            f << "LOAD_ADDR: 0x" << std::hex << Internal::g_loadAddress << "\n";
-            f << "MODULE_SIZE: 0x" << std::hex << Internal::g_moduleSize << "\n";
-            f << "EXEC_PATH: " << Internal::g_execPath << "\n";
-            f << "MESSAGE: " << msg << "\n";
-            f.close();
+        // Collapse the message to a single line so it stays one MESSAGE record.
+        for (char& c : msg) {
+            if (c == '\n' || c == '\r') c = ' ';
         }
 
+        try {
+            std::ofstream f(Internal::g_crashFilePath, std::ios::trunc);
+            if (f.is_open()) {
+                f << "SIGNAL: TERMINATE\n";
+                f << "TIME: " << time(nullptr) << "\n";
+                f << "LOAD_ADDR: 0x" << std::hex << Internal::g_loadAddress << "\n";
+                f << "MODULE_SIZE: 0x" << std::hex << Internal::g_moduleSize << std::dec << "\n";
+                f << "EXEC_PATH: " << Internal::g_execPath << "\n";
+                f << "MESSAGE: " << msg << "\n";
+                // Best-effort capture before abort(), on both supported platform paths.
+                // Termination may follow resource exhaustion; this is not guaranteed
+                // to succeed just because we are outside a signal handler.
+                void* frames[32];
+#ifdef _WIN32
+                int frameCount = CaptureStackBackTrace(0, 32, frames, nullptr);
+#else
+                int frameCount = backtrace(frames, 32);
+#endif
+                f << "STACKTRACE:\n";
+                for (int i = 0; i < frameCount; i++) {
+                    f << "  0x" << std::hex << reinterpret_cast<std::uintptr_t>(frames[i]) << std::dec << "\n";
+                }
+                f.close();
+                // close() flushes buffered output and reports write/close failures.
+                // Preserve only a complete record; otherwise leave abort's fallback.
+                if (f.good()) {
+                    Internal::g_terminateHandled.store(true, std::memory_order_relaxed);
+                }
+            }
+        } catch (...) {
+            // Stream setup can allocate. Still reach abort's fallback if it fails.
+        }
         std::abort();
     });
 
@@ -670,6 +711,18 @@ inline bool hasAddressesFromOurModule(const Report& report) {
     }
 
     unsigned long long moduleEnd = loadAddr + modSize;
+
+    // Windows FAULT_ADDR is the instruction pointer (Unix uses the accessed
+    // address). A fallback report can contain only this one frame.
+    if (report.signalName == "EXCEPTION" && !report.faultAddress.empty()) {
+        try {
+            const auto fault = std::stoull(report.faultAddress, nullptr, 16);
+            if (fault >= loadAddr && fault - loadAddr < modSize) return true;
+        } catch (...) {
+            // Fall through to the existing stack-based check.
+        }
+    }
+
 
     // Parse stacktrace for addresses
     std::istringstream iss(report.stacktrace);
@@ -710,72 +763,6 @@ inline bool hasAddressesFromOurModule(const Report& report) {
 }
 
 /**
- * @brief Rewrite a stacktrace line's absolute addresses into module-relative offsets.
- * @details Crash frames are captured as absolute runtime addresses. On platforms with
- *          ASLR (macOS/Linux) the module loads at a different base on every launch, so
- *          the same crash produces different absolute addresses each time. PostHog error
- *          tracking fingerprints on frame content, so without normalization every crash
- *          groups as a brand-new issue.
- *
- *          Any hex address on the line that falls inside our module's range
- *          [loadAddr, moduleEnd) is replaced with `<module>+0x<offset>`, which is
- *          identical across launches and matches the offset expected by
- *          scripts/symbolize.py. Addresses outside our module (system libraries) are
- *          left untouched. In-module offsets are appended to @p outOffsets (if provided)
- *          so callers can build a stable crash fingerprint.
- *
- * @param line The stacktrace line to normalize.
- * @param loadAddr Module load (base) address.
- * @param moduleEnd End of module range; 0 means unknown (treat any addr >= loadAddr as in-module).
- * @param outOffsets Optional collector for the module-relative offset strings that were rewritten.
- * @return The rewritten line.
- */
-inline std::string relativizeFrame(const std::string& line,
-                                   unsigned long long loadAddr,
-                                   unsigned long long moduleEnd,
-                                   std::vector<std::string>* outOffsets = nullptr) {
-    std::string out;
-    out.reserve(line.size());
-    size_t i = 0;
-    while (i < line.size()) {
-        // Detect a hex literal: 0x followed by hex digits.
-        if (line[i] == '0' && i + 1 < line.size() &&
-            (line[i + 1] == 'x' || line[i + 1] == 'X')) {
-            size_t end = i + 2;
-            while (end < line.size() &&
-                   std::isxdigit(static_cast<unsigned char>(line[end]))) {
-                end++;
-            }
-            if (end > i + 2) {
-                bool rewritten = false;
-                try {
-                    unsigned long long addr =
-                        std::stoull(line.substr(i, end - i), nullptr, 16);
-                    if (addr >= loadAddr && (moduleEnd == 0 || addr < moduleEnd)) {
-                        unsigned long long offset = addr - loadAddr;
-                        char buf[32];
-                        std::snprintf(buf, sizeof(buf), "0x%llx", offset);
-                        out += "<module>+";
-                        out += buf;
-                        if (outOffsets) outOffsets->push_back(buf);
-                        rewritten = true;
-                    }
-                } catch (...) {
-                    // fall through and copy the literal verbatim
-                }
-                if (!rewritten) {
-                    out.append(line, i, end - i);
-                }
-                i = end;
-                continue;
-            }
-        }
-        out += line[i++];
-    }
-    return out;
-}
-
-/**
  * @brief Check if there's a pending crash report from previous run
  * @return Crash report if exists
  */
@@ -812,7 +799,7 @@ inline std::optional<Report> loadPendingReport() {
             report.execPath = line.substr(11);
             inStacktrace = false;
         } else if (line.rfind("MESSAGE: ", 0) == 0) {
-            report.stacktrace = line.substr(9);
+            report.message = line.substr(9);
             inStacktrace = false;
         } else if (line == "STACKTRACE:") {
             inStacktrace = true;

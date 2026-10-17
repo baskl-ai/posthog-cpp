@@ -8,6 +8,7 @@
 #include <posthog/stacktrace.h>
 #include <posthog/crash_handler.h>
 #include <posthog/logging.h>
+#include "../src/exception_frames.h"
 #include <iostream>
 #include <cassert>
 #include <fstream>
@@ -54,6 +55,55 @@ TEST(stacktrace_structured) {
     auto frames = PostHog::Stacktrace::captureStructured(10, 0);
     CHECK(!frames.empty());
     CHECK(!frames[0].function.empty());
+}
+
+TEST(stacktrace_offset_frames_not_resolved) {
+    auto frames = PostHog::Stacktrace::captureStructured(20, 0);
+    CHECK(!frames.empty());
+    for (const auto& f : frames) {
+        CHECK(f.function.rfind("0x", 0) != 0);
+        if (f.function.rfind("<module>+0x", 0) == 0 || f.function == "(unknown)") {
+            CHECK(!f.resolved);
+        }
+    }
+}
+
+TEST(stacktrace_stable_wire_frames) {
+    using PostHog::Stacktrace::detail::unresolvedFrame;
+    using PostHog::detail::exceptionFrames;
+    auto a = unresolvedFrame(0x101234, 0x100000, "/install/a/plugin.so");
+    auto b = unresolvedFrame(0x701234, 0x700000, "/install/b/plugin.so");
+    CHECK(a.function == "<module>+0x1234");
+    CHECK(a.module == "plugin.so");
+    CHECK(exceptionFrames({a}) == exceptionFrames({b}));
+    CHECK(exceptionFrames({a})[0]["resolved"] == false);
+    CHECK(exceptionFrames({a}) != exceptionFrames({
+        unresolvedFrame(0x701235, 0x700000, "/install/b/plugin.so")}));
+    CHECK(exceptionFrames({a}) != exceptionFrames({
+        unresolvedFrame(0x701234, 0x700000, "/install/b/other.so")}));
+    CHECK(unresolvedFrame(0x1234, 0x1000, "C:\\plugins\\plugin.dll").module == "plugin.dll");
+    CHECK(unresolvedFrame(0x1234, 0x1000, "plugin.so").module == "plugin.so");
+    auto unknown = unresolvedFrame(0x1234, 0, "");
+    CHECK(unknown.function == "(unknown)");
+    CHECK(exceptionFrames({unknown}) == exceptionFrames({unresolvedFrame(0x9876, 0, "")}));
+    CHECK(unresolvedFrame(0x1234, 0x2000, "").function == "(unknown)");
+    a.function = "actual_function";
+    a.resolved = true;
+    a.filename = "source.cpp";
+    a.lineno = 42;
+    const auto resolved = exceptionFrames({a})[0];
+    CHECK(resolved["resolved"] == true);
+    CHECK(resolved["function"] == "actual_function");
+    CHECK(resolved["filename"] == "source.cpp");
+    CHECK(resolved["lineno"] == 42);
+}
+
+TEST(stacktrace_invalid_limits) {
+    CHECK(PostHog::Stacktrace::captureStructured(0).empty());
+    CHECK(PostHog::Stacktrace::captureStructured(-1).empty());
+    CHECK(PostHog::Stacktrace::captureStructured(1, -1).empty());
+    CHECK(PostHog::Stacktrace::captureStructured(1, (std::numeric_limits<int>::max)()).empty());
+    CHECK(PostHog::Stacktrace::captureStructured(1, 0).size() == 1);
 }
 
 TEST(client_init_without_apikey) {
@@ -379,44 +429,6 @@ TEST(crash_filter_no_module_size) {
     CHECK(PostHog::CrashHandler::hasAddressesFromOurModule(report) == true);
 }
 
-TEST(relativize_frame_in_module) {
-    // Address inside module range becomes a stable module-relative offset.
-    std::vector<std::string> offsets;
-    std::string out = PostHog::CrashHandler::relativizeFrame(
-        "  0x100050000", 0x100000000ULL, 0x100100000ULL, &offsets);
-    CHECK(out == "  <module>+0x50000");
-    CHECK(offsets.size() == 1);
-    CHECK(offsets[0] == "0x50000");
-}
-
-TEST(relativize_frame_out_of_module) {
-    // System-library address outside our module is left untouched.
-    std::vector<std::string> offsets;
-    std::string out = PostHog::CrashHandler::relativizeFrame(
-        "  0x18bc93584", 0x100000000ULL, 0x100100000ULL, &offsets);
-    CHECK(out == "  0x18bc93584");
-    CHECK(offsets.empty());
-}
-
-TEST(relativize_frame_unknown_module_size) {
-    // moduleEnd == 0 means unknown size: any addr >= loadAddr is in-module.
-    std::vector<std::string> offsets;
-    std::string out = PostHog::CrashHandler::relativizeFrame(
-        "0x100000abc", 0x100000000ULL, 0, &offsets);
-    CHECK(out == "<module>+0xabc");
-    CHECK(offsets.size() == 1);
-}
-
-TEST(relativize_frame_stable_across_aslr) {
-    // The same crash at two different load addresses must yield identical
-    // offsets, so PostHog fingerprints them into a single issue.
-    std::vector<std::string> a, b;
-    PostHog::CrashHandler::relativizeFrame("0x100050000", 0x100000000ULL, 0x100100000ULL, &a);
-    PostHog::CrashHandler::relativizeFrame("0x200050000", 0x200000000ULL, 0x200100000ULL, &b);
-    CHECK(a == b);
-    CHECK(a[0] == "0x50000");
-}
-
 int main() {
     std::cout << "=== PostHog Unit Tests ===" << std::endl;
 
@@ -424,6 +436,9 @@ int main() {
     RUN_TEST(machine_id_algorithm);
     RUN_TEST(stacktrace_capture);
     RUN_TEST(stacktrace_structured);
+    RUN_TEST(stacktrace_offset_frames_not_resolved);
+    RUN_TEST(stacktrace_stable_wire_frames);
+    RUN_TEST(stacktrace_invalid_limits);
     RUN_TEST(client_init_without_apikey);
     RUN_TEST(client_distinct_id);
     RUN_TEST(client_enable_disable);
@@ -434,10 +449,6 @@ int main() {
     RUN_TEST(crash_filter_no_module_addresses);
     RUN_TEST(crash_filter_no_load_address);
     RUN_TEST(crash_filter_no_module_size);
-    RUN_TEST(relativize_frame_in_module);
-    RUN_TEST(relativize_frame_out_of_module);
-    RUN_TEST(relativize_frame_unknown_module_size);
-    RUN_TEST(relativize_frame_stable_across_aslr);
     RUN_TEST(optout_file_disables);
     RUN_TEST(no_optout_file_enables);
     RUN_TEST(config_enabled_false_disables);

@@ -12,6 +12,8 @@
 // Skip version check to avoid warnings when parent project uses different nlohmann/json version
 #define JSON_SKIP_LIBRARY_VERSION_CHECK
 #include <nlohmann/json.hpp>
+#include "exception_frames.h"
+#include "crash_frames.h"
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -22,7 +24,6 @@
 #include <atomic>
 #include <ctime>
 #include <cstdlib>
-#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -299,22 +300,7 @@ public:
 
         json stacktrace;
         stacktrace["type"] = "raw";
-        json framesList = json::array();
-
-        for (const auto& frame : frames) {
-            json f;
-            f["platform"] = "custom";
-            f["lang"] = "cpp";
-            f["function"] = frame.function;
-            if (!frame.filename.empty()) f["filename"] = frame.filename;
-            if (frame.lineno > 0) f["lineno"] = frame.lineno;
-            if (!frame.module.empty()) f["module"] = frame.module;
-            f["in_app"] = frame.inApp;
-            f["resolved"] = true;
-            framesList.push_back(f);
-        }
-
-        stacktrace["frames"] = framesList;
+        stacktrace["frames"] = detail::exceptionFrames(frames);
         exception["stacktrace"] = stacktrace;
         exceptionList.push_back(exception);
 
@@ -427,8 +413,13 @@ public:
                     description += " (invalid permissions for mapped object)";
                 }
             }
+        } else if (report.signalName == "TERMINATE") {
+            // Uncaught C++ exception. The message is the exception's what() text.
+            description = report.message.empty() ? "Unhandled C++ exception" : report.message;
         } else if (report.signalName == "SIGABRT") {
-            description = "Aborted";
+            // A genuine abort() keeps the "Aborted" label; if a terminate message
+            // survived, surface it so the issue names the exception.
+            description = report.message.empty() ? "Aborted" : report.message;
         } else if (report.signalName == "SIGBUS") {
             description = "Bus Error";
             if (!report.faultAddress.empty()) {
@@ -510,72 +501,17 @@ public:
         exception["mechanism"]["handled"] = false;
         exception["mechanism"]["synthetic"] = false;
 
-        // Parse the module load address (and size) so we can turn ASLR-slid
-        // absolute frame addresses into stable module-relative offsets. Without
-        // this, PostHog fingerprints every launch's crash as a new issue.
-        bool haveLoadAddr = false;
-        unsigned long long loadAddr = 0;
-        unsigned long long moduleEnd = 0;
-        if (!report.loadAddress.empty()) {
-            try {
-                loadAddr = std::stoull(report.loadAddress, nullptr, 16);
-                haveLoadAddr = true;
-                if (!report.moduleSize.empty()) {
-                    unsigned long long modSize =
-                        std::stoull(report.moduleSize, nullptr, 16);
-                    if (modSize > 0) {
-                        moduleEnd = loadAddr + modSize;
-                    }
-                }
-            } catch (...) {
-                haveLoadAddr = false;
-            }
-        }
-
         json stacktrace;
         stacktrace["type"] = "raw";
-        json framesList = json::array();
+        stacktrace["frames"] = detail::crashFrames(report);
+        // Preserve the original trace for offline symbolization. Normalized
+        // custom frames do not enable server-side native symbolication.
+        props["crash_stacktrace"] = report.stacktrace;
 
-        // Module-relative offsets that make up a stable crash fingerprint.
-        std::vector<std::string> fingerprintOffsets;
-
-        std::istringstream ss(report.stacktrace);
-        std::string line;
-        while (std::getline(ss, line)) {
-            if (line.find("0x") != std::string::npos) {
-                std::string normalized = haveLoadAddr
-                    ? CrashHandler::relativizeFrame(line, loadAddr, moduleEnd,
-                                                    &fingerprintOffsets)
-                    : line;
-                json f;
-                f["platform"] = "custom";
-                f["lang"] = "cpp";
-                f["function"] = normalized;
-                f["in_app"] = true;
-                f["resolved"] = false;
-                framesList.push_back(f);
-            }
-        }
-
-        stacktrace["frames"] = framesList;
         exception["stacktrace"] = stacktrace;
         exceptionList.push_back(exception);
 
         props["$exception_list"] = exceptionList;
-
-        // Set an explicit fingerprint from the signal type plus the stable
-        // module-relative offsets, so the same crash groups into one issue
-        // across launches regardless of ASLR. Only set it when we actually
-        // normalized in-module frames; otherwise fall back to PostHog's default
-        // grouping rather than over-collapsing unrelated crashes.
-        if (!fingerprintOffsets.empty()) {
-            json fingerprint = json::array();
-            fingerprint.push_back(report.signalName);
-            for (const auto& offset : fingerprintOffsets) {
-                fingerprint.push_back(offset);
-            }
-            props["$exception_fingerprint"] = fingerprint;
-        }
         j["properties"] = props;
 
         QueuedItem req;
