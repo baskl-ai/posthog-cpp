@@ -503,15 +503,20 @@ public:
 
         json stacktrace;
         stacktrace["type"] = "raw";
-        stacktrace["frames"] = detail::crashFrames(report, config.appName);
-        // Preserve the original trace for offline symbolization. Normalized
-        // custom frames do not enable server-side native symbolication.
+        auto frameProperties = detail::crashFrameProperties(report, config.appName);
+        stacktrace["frames"] = std::move(frameProperties["frames"]);
         props["crash_stacktrace"] = report.stacktrace;
-
         exception["stacktrace"] = stacktrace;
         exceptionList.push_back(exception);
 
         props["$exception_list"] = exceptionList;
+
+        if (frameProperties.contains("$debug_images")) {
+            props["$debug_images"] = std::move(frameProperties["$debug_images"]);
+        }
+        if (frameProperties.contains("crash_instruction_addr")) {
+            props["crash_instruction_addr"] = std::move(frameProperties["crash_instruction_addr"]);
+        }
         j["properties"] = props;
 
         QueuedItem req;

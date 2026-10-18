@@ -68,6 +68,32 @@ else()
     endif()
 endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+if(POSTHOG_USE_CURL AND (TARGET CURL::libcurl OR TARGET libcurl_static))
+    add_executable(crash_payload_probe crash_payload_probe.cpp)
+    target_link_libraries(crash_payload_probe PRIVATE posthog)
+    add_test(NAME crash_payload COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_crash_payload.py $<TARGET_FILE:crash_payload_probe>)
+endif()
+if(APPLE)
+    add_executable(native_metadata_probe native_metadata_probe.cpp native_metadata_module.cpp)
+    target_link_libraries(native_metadata_probe PRIVATE posthog)
+    add_library(native_metadata_module MODULE native_metadata_module.cpp)
+    target_include_directories(native_metadata_module PRIVATE ../include)
+    set_target_properties(native_metadata_module PROPERTIES CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN TRUE)
+    target_compile_options(native_metadata_probe PRIVATE -O2 -g)
+    set_target_properties(native_metadata_probe PROPERTIES CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN TRUE)
+    target_compile_options(native_metadata_module PRIVATE -O2 -g)
+    add_test(NAME native_metadata COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_native_metadata.py $<TARGET_FILE:native_metadata_probe>
+        $<TARGET_FILE:native_metadata_module>)
+    if(TARGET crash_payload_probe)
+        add_test(NAME native_crash_symbolication COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_native_crash.py $<TARGET_FILE:native_metadata_probe>
+            $<TARGET_FILE:native_metadata_module> $<TARGET_FILE:crash_payload_probe>)
+    endif()
+endif()
 add_executable(crash_frames_tests crash_frames_tests.cpp)
 target_link_libraries(crash_frames_tests PRIVATE posthog)
 add_test(NAME crash_frames COMMAND crash_frames_tests)

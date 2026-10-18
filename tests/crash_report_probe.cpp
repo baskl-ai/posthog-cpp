@@ -39,6 +39,7 @@ int main(int argc, char** argv) {
     const auto report = PostHog::CrashHandler::loadPendingReport();
     if (!report) return 4;
     std::cout << nlohmann::json({{"frames", PostHog::detail::crashFrames(*report, "crash_report_probe")},
+        {"wire_frames", PostHog::detail::crashFrameProperties(*report, "crash_report_probe")["frames"]},
         {"raw", report->stacktrace}, {"load_address", report->loadAddress},
         {"module_size", report->moduleSize}, {"message", report->message}}).dump() << '\n';
 }

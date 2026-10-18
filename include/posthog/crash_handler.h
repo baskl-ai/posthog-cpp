@@ -33,6 +33,7 @@
 #include <csignal>
 #include <atomic>
 #include <cstdint>
+#include <limits>
 #include <deque>
 #include <limits>
 
@@ -54,6 +55,10 @@
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
+#include <sys/ucontext.h>
+#if defined(__aarch64__) || defined(__arm64__)
+#include <mach/arm/thread_status.h>
+#endif
 #endif
 #endif
 
@@ -74,6 +79,8 @@ struct Report {
     std::string loadAddress;     ///< Load address for symbolication
     std::string moduleSize;      ///< Size of our module (for address range filtering)
     std::string execPath;        ///< Path to executable
+    std::string debugId;         ///< Module debug id (Mach-O LC_UUID) for server-side symbolication
+    std::string instructionAddress; ///< Interrupted instruction, distinct from the accessed FAULT_ADDR
 };
 
 /**
@@ -100,6 +107,78 @@ namespace Internal {
     inline std::uintptr_t g_loadAddress = 0;
     inline std::size_t g_moduleSize = 0;  // Size of our module for address filtering
     inline char g_execPath[512] = {0};
+    // Formatted before handlers are installed; copied verbatim during a crash.
+    inline char g_debugId[37] = {0};
+
+    inline void formatDebugId(const unsigned char* uuid, char (&output)[37]) {
+        constexpr char hex[] = "0123456789ABCDEF";
+        size_t pos = 0;
+        for (size_t b = 0; b < 16; ++b) {
+            if (b == 4 || b == 6 || b == 8 || b == 10) output[pos++] = '-';
+            output[pos++] = hex[uuid[b] >> 4];
+            output[pos++] = hex[uuid[b] & 0xf];
+        }
+        output[pos] = '\0';
+    }
+
+#ifdef __APPLE__
+    inline std::uintptr_t signalInstructionAddress(void* context) noexcept {
+        if (!context) return 0;
+        const auto* uc = static_cast<const ucontext_t*>(context);
+        if (!uc->uc_mcontext) return 0;
+#if defined(__aarch64__) || defined(__arm64__)
+        return static_cast<std::uintptr_t>(arm_thread_state64_get_pc(uc->uc_mcontext->__ss));
+#elif defined(__x86_64__)
+        return static_cast<std::uintptr_t>(uc->uc_mcontext->__ss.__rip);
+#else
+        return 0;
+#endif
+    }
+
+    // Called at install time, never from a crash handler. Mach-O vmaddrs are
+    // preferred addresses; image_size must be relative to the mapped header,
+    // excluding __PAGEZERO (notably for standalone executables).
+    inline void readMachOMetadata(const mach_header* header) {
+        g_moduleSize = 0;
+        g_debugId[0] = '\0';
+        if (!header || header->magic != MH_MAGIC_64) return;
+        const auto* h = reinterpret_cast<const mach_header_64*>(header);
+        const char* cursor = reinterpret_cast<const char*>(h + 1);
+        const char* end = cursor + h->sizeofcmds;
+        std::uint64_t preferredBase = 0, imageEnd = 0;
+        bool haveBase = false, haveUuid = false;
+        char debugId[37] = {0};
+        for (uint32_t i = 0; i < h->ncmds; ++i) {
+            if (static_cast<size_t>(end - cursor) < sizeof(load_command)) return;
+            const auto* cmd = reinterpret_cast<const load_command*>(cursor);
+            if (cmd->cmdsize < sizeof(load_command) || cmd->cmdsize > static_cast<size_t>(end - cursor)
+                || cmd->cmdsize % alignof(segment_command_64) != 0) return;
+            if (cmd->cmd == LC_SEGMENT_64) {
+                if (cmd->cmdsize < sizeof(segment_command_64)) return;
+                const auto* seg = reinterpret_cast<const segment_command_64*>(cmd);
+                if (std::strncmp(seg->segname, "__PAGEZERO", 16) != 0) {
+                    if (seg->fileoff == 0 && seg->filesize > 0 && (!haveBase || seg->vmaddr < preferredBase)) {
+                        preferredBase = seg->vmaddr;
+                        haveBase = true;
+                    }
+                    if (seg->vmsize > (std::numeric_limits<std::uint64_t>::max)() - seg->vmaddr) return;
+                    const auto segmentEnd = seg->vmaddr + seg->vmsize;
+                    if (segmentEnd > imageEnd) imageEnd = segmentEnd;
+                }
+            } else if (cmd->cmd == LC_UUID) {
+                if (cmd->cmdsize < sizeof(uuid_command) || haveUuid) return;
+                haveUuid = true;
+                const auto* uuid = reinterpret_cast<const uuid_command*>(cmd);
+                formatDebugId(uuid->uuid, debugId);
+            }
+            cursor += cmd->cmdsize;
+        }
+        if (haveBase && imageEnd > preferredBase) {
+            g_moduleSize = static_cast<std::size_t>(imageEnd - preferredBase);
+            std::memcpy(g_debugId, debugId, sizeof(g_debugId));
+        }
+    }
+#endif
     // Set by the std::terminate hook right before it calls std::abort(). It tells the
     // SIGABRT handler that a full TERMINATE record (with the exception message) is
     // already on disk, so the handler must not truncate and overwrite it.
@@ -183,7 +262,9 @@ namespace Internal {
 
 #ifndef _WIN32
     inline void signalHandlerWithInfo(int sig, siginfo_t* info, void* ucontext) {
-        (void)ucontext;  // Unused for now
+#ifndef __APPLE__
+        (void)ucontext;
+#endif
 
         // An uncaught C++ exception routes through std::terminate, which already wrote
         // a full TERMINATE record (with the exception message) before calling
@@ -268,6 +349,32 @@ namespace Internal {
         safeCopy(ptr, g_execPath, remaining);
         ptr += strlen(ptr);
         remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+#ifdef __APPLE__
+        // backtrace() starts inside this handler and can stop before the fault
+        // site. Preserve the interrupted PC directly from the supplied context.
+        const auto instruction = signalInstructionAddress(ucontext);
+        if (instruction != 0) {
+            safeCopy(ptr, "\nINSTRUCTION_ADDR: ", remaining);
+            ptr += strlen(ptr);
+            remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+            char address[2 + sizeof(instruction) * 2 + 1];
+            safeUlongToHex(instruction, address, sizeof(address));
+            safeCopy(ptr, address, remaining);
+            ptr += strlen(ptr);
+            remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+        }
+#endif
+
+        if (g_debugId[0] != '\0') {
+            safeCopy(ptr, "\nDEBUG_ID: ", remaining);
+            ptr += strlen(ptr);
+            remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+
+            safeCopy(ptr, g_debugId, remaining);
+            ptr += strlen(ptr);
+            remaining = sizeof(g_crashBuffer) - (ptr - g_crashBuffer);
+        }
 
         safeCopy(ptr, "\nSTACKTRACE:\n", remaining);
         ptr += strlen(ptr);
@@ -536,34 +643,11 @@ inline bool install(const std::string& crashDir) {
         for (uint32_t i = 0; i < imageCount; i++) {
             const struct mach_header* header = _dyld_get_image_header(i);
             if (reinterpret_cast<const void*>(header) == info.dli_fbase) {
-                // Calculate size from mach-o header
-                if (header->magic == MH_MAGIC_64) {
-                    const struct mach_header_64* header64 = reinterpret_cast<const struct mach_header_64*>(header);
-                    const struct load_command* cmd = reinterpret_cast<const struct load_command*>(header64 + 1);
-                    std::uint64_t preferredBase = (std::numeric_limits<std::uint64_t>::max)();
-                    std::uint64_t imageEnd = 0;
-                    bool valid = true;
-                    for (uint32_t j = 0; j < header64->ncmds; j++) {
-                        if (cmd->cmd == LC_SEGMENT_64) {
-                            const struct segment_command_64* seg = reinterpret_cast<const struct segment_command_64*>(cmd);
-                            // __PAGEZERO is an unmapped guard. Segment vmaddrs
-                            // include the preferred base (0x100000000 for a
-                            // typical executable); they are not image sizes.
-                            if (std::strncmp(seg->segname, SEG_PAGEZERO, sizeof(seg->segname)) != 0) {
-                                if (seg->fileoff == 0 && seg->filesize != 0 && seg->vmaddr < preferredBase)
-                                    preferredBase = seg->vmaddr;
-                                if (seg->vmsize > (std::numeric_limits<std::uint64_t>::max)() - seg->vmaddr) {
-                                    valid = false;
-                                } else if (seg->vmaddr + seg->vmsize > imageEnd) {
-                                    imageEnd = seg->vmaddr + seg->vmsize;
-                                }
-                            }
-                        }
-                        cmd = reinterpret_cast<const struct load_command*>(reinterpret_cast<const char*>(cmd) + cmd->cmdsize);
-                    }
-                    if (valid && imageEnd > preferredBase &&
-                        imageEnd - preferredBase <= (std::numeric_limits<std::size_t>::max)())
-                        Internal::g_moduleSize = static_cast<std::size_t>(imageEnd - preferredBase);
+                Internal::readMachOMetadata(header);
+                // This is the plugin/library containing install(), not the host app.
+                if (info.dli_fname) {
+                    Internal::safeCopy(Internal::g_execPath, info.dli_fname,
+                                       sizeof(Internal::g_execPath));
                 }
                 break;
             }
@@ -651,6 +735,9 @@ inline bool install(const std::string& crashDir) {
                 f << "LOAD_ADDR: 0x" << std::hex << Internal::g_loadAddress << "\n";
                 f << "MODULE_SIZE: 0x" << std::hex << Internal::g_moduleSize << std::dec << "\n";
                 f << "EXEC_PATH: " << Internal::g_execPath << "\n";
+                if (Internal::g_debugId[0] != '\0') {
+                    f << "DEBUG_ID: " << Internal::g_debugId << "\n";
+                }
                 f << "MESSAGE: " << msg << "\n";
                 // Best-effort capture before abort(), on both supported platform paths.
                 // Termination may follow resource exhaustion; this is not guaranteed
@@ -710,7 +797,16 @@ inline bool hasAddressesFromOurModule(const Report& report) {
         return true;
     }
 
-    unsigned long long moduleEnd = loadAddr + modSize;
+    // A saved fault-site PC is stronger evidence than handler stack frames.
+    // An outside-module PC is inconclusive: plugin code may call a failing
+    // library, so retain the legacy heuristic rather than dropping that report.
+    if (!report.instructionAddress.empty()) {
+        try {
+            size_t consumed = 0;
+            const auto pc = std::stoull(report.instructionAddress, &consumed, 16);
+            if (consumed == report.instructionAddress.size() && pc >= loadAddr && pc - loadAddr < modSize) return true;
+        } catch (...) {}
+    }
 
     // Windows FAULT_ADDR is the instruction pointer (Unix uses the accessed
     // address). A fallback report can contain only this one frame.
@@ -742,7 +838,7 @@ inline bool hasAddressesFromOurModule(const Report& report) {
                 std::string addrStr = line.substr(pos, endPos - pos);
                 try {
                     unsigned long long addr = std::stoull(addrStr, nullptr, 16);
-                    if (addr >= loadAddr && addr < moduleEnd) {
+                    if (addr >= loadAddr && addr - loadAddr < modSize) {
                         framesFromOurModule++;
                         // Need at least 2 frames from our module
                         // (1 is always the crash handler itself)
@@ -797,6 +893,12 @@ inline std::optional<Report> loadPendingReport() {
             inStacktrace = false;
         } else if (line.rfind("EXEC_PATH: ", 0) == 0) {
             report.execPath = line.substr(11);
+            inStacktrace = false;
+        } else if (line.rfind("DEBUG_ID: ", 0) == 0) {
+            report.debugId = line.substr(10);
+            inStacktrace = false;
+        } else if (line.rfind("INSTRUCTION_ADDR: ", 0) == 0) {
+            report.instructionAddress = line.substr(18);
             inStacktrace = false;
         } else if (line.rfind("MESSAGE: ", 0) == 0) {
             report.message = line.substr(9);

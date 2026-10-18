@@ -38,6 +38,15 @@ int main(int argc, char** argv) {
     if (mode == "verify") {
         auto report = PostHog::CrashHandler::loadPendingReport();
         check(report.has_value(), "missing report on next launch");
+#ifdef __APPLE__
+        check(!report->debugId.empty(), "missing Mach-O UUID in crash report");
+        check(report->debugId == PostHog::CrashHandler::Internal::g_debugId,
+              "crash report UUID differs from the current binary");
+        check(std::stoull(report->moduleSize, nullptr, 16) < 0x100000000ULL,
+              "image size includes the preferred load address or PAGEZERO");
+#else
+        check(report->debugId.empty(), "unexpected debug ID on unsupported platform");
+#endif
         const bool native = scenario == "native" || scenario == "no_filter";
         check(report->signalName == (native ? "EXCEPTION" : scenario == "abort" ? "SIGABRT" : "TERMINATE"),
               "wrong signal: terminate record overwritten or direct abort suppressed");

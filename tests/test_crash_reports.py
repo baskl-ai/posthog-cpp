@@ -72,7 +72,7 @@ with tempfile.TemporaryDirectory(prefix="posthog-crash-") as temp:
                 exception = props["$exception_list"][0]
                 assert exception["value"] == "grouping_test_marker"
                 assert exception["mechanism"]["handled"] is False
-                assert exception["stacktrace"]["frames"] == captured["frames"]
+                assert exception["stacktrace"]["frames"] == captured["wire_frames"]
                 assert "$exception_fingerprint" not in props, "SDK must preserve server grouping rules"
                 assert not (directory / "pending_crash.txt").exists()
             finally:
