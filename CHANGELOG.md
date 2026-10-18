@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.7.10] - 2026-10-17
+
+### Fixed
+- Include the logical application module name on normalized crash frames, keeping equal offsets from different plugins distinct in frame inputs.
+- Bound Mach-O segment-name comparisons and the loopback test timeout.
+
+## [1.7.9] - 2026-10-17
+
+### Fixed
+- Use stable module-relative names for raw crash frames inside a validated module range; mark known outside-module frames as external. Keep PostHog automatic grouping and configured rules, without a custom fingerprint override.
+- Preserve the raw stack in `crash_stacktrace` for offline symbolization; accept full event JSON and mixed relative/raw frame lists in the symbolizer. Relative frames still require the original load address.
+- Capture the Linux loaded-image span and exclude the Mach-O preferred base and `__PAGEZERO` from macOS image sizes.
+
+### Tests
+- Cover malformed/overflowing ranges, address boundaries, relocation, legacy frames, mixed symbolizer inputs, real crash/next-launch traces, and complete events over loopback HTTP.
+
 ## [1.7.8] - 2026-09-29
 
 ### Changed

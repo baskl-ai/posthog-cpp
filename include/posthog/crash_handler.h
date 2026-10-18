@@ -34,6 +34,7 @@
 #include <atomic>
 #include <cstdint>
 #include <deque>
+#include <limits>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -47,6 +48,9 @@
 #include <execinfo.h>
 #include <sys/stat.h>
 #include <dlfcn.h>
+#ifdef __linux__
+#include <link.h>
+#endif
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
@@ -536,20 +540,56 @@ inline bool install(const std::string& crashDir) {
                 if (header->magic == MH_MAGIC_64) {
                     const struct mach_header_64* header64 = reinterpret_cast<const struct mach_header_64*>(header);
                     const struct load_command* cmd = reinterpret_cast<const struct load_command*>(header64 + 1);
+                    std::uint64_t preferredBase = (std::numeric_limits<std::uint64_t>::max)();
+                    std::uint64_t imageEnd = 0;
+                    bool valid = true;
                     for (uint32_t j = 0; j < header64->ncmds; j++) {
                         if (cmd->cmd == LC_SEGMENT_64) {
                             const struct segment_command_64* seg = reinterpret_cast<const struct segment_command_64*>(cmd);
-                            unsigned long segEnd = seg->vmaddr + seg->vmsize;
-                            if (segEnd > Internal::g_moduleSize) {
-                                Internal::g_moduleSize = segEnd;
+                            // __PAGEZERO is an unmapped guard. Segment vmaddrs
+                            // include the preferred base (0x100000000 for a
+                            // typical executable); they are not image sizes.
+                            if (std::strncmp(seg->segname, SEG_PAGEZERO, sizeof(seg->segname)) != 0) {
+                                if (seg->fileoff == 0 && seg->filesize != 0 && seg->vmaddr < preferredBase)
+                                    preferredBase = seg->vmaddr;
+                                if (seg->vmsize > (std::numeric_limits<std::uint64_t>::max)() - seg->vmaddr) {
+                                    valid = false;
+                                } else if (seg->vmaddr + seg->vmsize > imageEnd) {
+                                    imageEnd = seg->vmaddr + seg->vmsize;
+                                }
                             }
                         }
                         cmd = reinterpret_cast<const struct load_command*>(reinterpret_cast<const char*>(cmd) + cmd->cmdsize);
                     }
+                    if (valid && imageEnd > preferredBase &&
+                        imageEnd - preferredBase <= (std::numeric_limits<std::size_t>::max)())
+                        Internal::g_moduleSize = static_cast<std::size_t>(imageEnd - preferredBase);
                 }
                 break;
             }
         }
+#elif defined(__linux__)
+        // Resolve the image while it is loaded. The next process cannot dladdr
+        // addresses belonging to the crashed process's ASLR layout.
+        dl_iterate_phdr([](struct dl_phdr_info* image, std::size_t, void*) {
+            const auto base = Internal::g_loadAddress;
+            std::uintptr_t end = 0;
+            bool containsModule = false;
+            for (std::size_t i = 0; i < image->dlpi_phnum; ++i) {
+                const auto& segment = image->dlpi_phdr[i];
+                if (segment.p_type != PT_LOAD) continue;
+                const auto limit = (std::numeric_limits<std::uintptr_t>::max)();
+                if (segment.p_vaddr > limit - image->dlpi_addr) return 0;
+                const auto start = image->dlpi_addr + segment.p_vaddr;
+                if (segment.p_memsz > limit - start) return 0;
+                const auto segmentEnd = start + segment.p_memsz;
+                if (base >= start && base < segmentEnd) containsModule = true;
+                if (segmentEnd > end) end = segmentEnd;
+            }
+            if (!containsModule || end <= base) return 0;
+            Internal::g_moduleSize = end - base;
+            return 1;
+        }, nullptr);
 #endif
     }
 #endif

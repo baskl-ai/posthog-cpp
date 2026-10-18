@@ -76,3 +76,6 @@ jobs:
 
       - name: Build
         run: cmake --build build --config Release
+
+      - name: Run tests with CURL
+        run: ctest --test-dir build/tests --output-on-failure -C Release

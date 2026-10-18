@@ -13,6 +13,7 @@
 #define JSON_SKIP_LIBRARY_VERSION_CHECK
 #include <nlohmann/json.hpp>
 #include "exception_frames.h"
+#include "crash_frames.h"
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -502,23 +503,11 @@ public:
 
         json stacktrace;
         stacktrace["type"] = "raw";
-        json framesList = json::array();
+        stacktrace["frames"] = detail::crashFrames(report, config.appName);
+        // Preserve the original trace for offline symbolization. Normalized
+        // custom frames do not enable server-side native symbolication.
+        props["crash_stacktrace"] = report.stacktrace;
 
-        std::istringstream ss(report.stacktrace);
-        std::string line;
-        while (std::getline(ss, line)) {
-            if (line.find("0x") != std::string::npos) {
-                json f;
-                f["platform"] = "custom";
-                f["lang"] = "cpp";
-                f["function"] = line;
-                f["in_app"] = true;
-                f["resolved"] = false;
-                framesList.push_back(f);
-            }
-        }
-
-        stacktrace["frames"] = framesList;
         exception["stacktrace"] = stacktrace;
         exceptionList.push_back(exception);
 

@@ -123,27 +123,50 @@ not an unwind of the supplied exception context. Offline symbolization requires
 the matching binary/debug symbols; this change does not add a minidump or fix
 unrelated crash grouping and symbolizer limitations.
 
+### Crash frame grouping
+
+For the same binary and call path, raw addresses inside a valid recorded module
+range become stable `<module>+0x<offset>` custom frame names, labeled with the
+logical application name in `module`. Known outside-module
+frames keep their raw text and have `in_app=false`. Missing, zero, malformed or
+overflowing ranges retain the legacy frame inputs. The raw trace is also saved in
+`crash_stacktrace`, alongside the original `load_address` event property.
+
+This removes ASLR variation from in-module frame names. It does not set
+`$exception_fingerprint`: PostHog's automatic grouping and project grouping rules
+still apply. Exception messages (including fault addresses), external frames,
+different builds and incomplete stacks can still affect grouping. This neither
+repairs historical issues nor changes which crashes the SDK attributes to a
+plugin; handler-only stacks remain an attribution limitation. Offsets are not
+resolved function names and do not enable native server-side symbolication
+(the separate work in PR #7).
+
 ### Symbolization
 
-Crash stack traces contain only memory addresses. To get function names and line numbers:
+Prefer a full event JSON (or its properties object). The script uses its original
+raw trace and load address:
 
 ```bash
-python scripts/symbolize.py \
-    --executable /path/to/MyApp \
-    --load-address 0x104504000 \
-    --addresses 0x104507698 0x104505bf4 0x104506a10
+python scripts/symbolize.py --json event.json --binary /path/to/MyApp
 ```
 
-**Requirements:**
-- Original executable (same build that crashed)
-- Debug symbols: `.dSYM` (macOS), `.pdb` (Windows), or debug build (Linux)
-- Load address from crash report (`load_address` property in PostHog)
+A copied `$exception_list`, including a mixture of normalized and legacy raw
+frames, still needs the original event's load address:
 
-**Output:**
+```bash
+python scripts/symbolize.py --json exception_list.json \
+    --load-addr 0x104504000 --binary /path/to/MyApp
 ```
-0x104507698 -> main (main.cpp:42)
-0x104505bf4 -> processData (processor.cpp:128)
-```
+
+The symbolizer reconstructs each relative frame's runtime address separately;
+it does not treat system-library addresses as module offsets. Without a load
+address it reports that normalized frames need one, rather than guessing a
+Mach-O preferred base. As before, resolving system-library frames needs their
+own binaries and load addresses.
+
+Requirements: the matching executable and debug symbols (`.dSYM` on macOS,
+`.pdb` on Windows, or a debug build on Linux). A raw crash file also works with
+`--crash pending_crash.txt`; legacy absolute-address events remain supported.
 
 ### Runtime Exceptions vs Crashes
 
