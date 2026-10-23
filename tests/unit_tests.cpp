@@ -414,6 +414,39 @@ TEST(crash_filter_no_module_addresses) {
     CHECK(PostHog::CrashHandler::hasAddressesFromOurModule(report) == false);
 }
 
+TEST(crash_filter_terminate_hook_only) {
+    // Uncaught exception in another module: only the terminate hook's own
+    // frames (lambda + invoker) are ours - should be filtered
+    PostHog::CrashHandler::Report report;
+    report.signalName = "TERMINATE";
+    report.loadAddress = "0x100000000";
+    report.moduleSize = "0x100000";
+    report.stacktrace = R"(
+  0x100050000
+  0x100050100
+  0x18bc93584
+  0x18bc93600
+  0x200000000
+)";
+    CHECK(PostHog::CrashHandler::hasAddressesFromOurModule(report) == false);
+}
+
+TEST(crash_filter_terminate_from_our_module) {
+    // Uncaught exception thrown in our module: one frame under the hook is enough
+    PostHog::CrashHandler::Report report;
+    report.signalName = "TERMINATE";
+    report.loadAddress = "0x100000000";
+    report.moduleSize = "0x100000";
+    report.stacktrace = R"(
+  0x100050000
+  0x100050100
+  0x18bc93584
+  0x100020000
+  0x200000000
+)";
+    CHECK(PostHog::CrashHandler::hasAddressesFromOurModule(report) == true);
+}
+
 TEST(crash_filter_no_load_address) {
     // Crash without load address info - can't filter, assume ours
     PostHog::CrashHandler::Report report;

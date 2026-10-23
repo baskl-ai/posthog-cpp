@@ -106,6 +106,11 @@ Based on `config.appName`:
 2. **Next launch** → `installCrashHandler()` detects the file and sends `$exception` event
 3. **PostHog** → shows crash in Error Tracking
 
+A report is sent only when its stack has a frame of our module besides the
+crash handler itself. The `std::terminate` hook is process-wide on macOS and
+Linux, so its own frames do not count: an uncaught exception in the host
+application or another plugin is not reported as ours.
+
 ### Windows crash capture
 
 The Windows exception filter admits one writer per SDK module and saves the

@@ -687,6 +687,7 @@ inline bool install(const std::string& crashDir) {
  * @param report The crash report to check
  * @return true if at least one address in stacktrace is from our module
  * @details Excludes the crash handler's own frame (signalHandler/exceptionFilter)
+ *          and, in TERMINATE records, the leading frames of the terminate hook
  */
 inline bool hasAddressesFromOurModule(const Report& report) {
     if (report.loadAddress.empty() || report.moduleSize.empty()) {
@@ -724,6 +725,16 @@ inline bool hasAddressesFromOurModule(const Report& report) {
     }
 
 
+    // A TERMINATE record is captured inside our std::terminate hook, so its
+    // stack opens with the hook's own frames. On Unix the hook is process-wide:
+    // an uncaught exception in the host or another plugin lands there too, and
+    // those leading frames say nothing about where it came from. They are
+    // skipped, and one module frame after them is enough. Other records keep
+    // the rule below: the signal handler frame plus one more.
+    const bool terminate = report.signalName == "TERMINATE";
+    bool inHook = terminate;
+    const int framesNeeded = terminate ? 1 : 2;
+
     // Parse stacktrace for addresses
     std::istringstream iss(report.stacktrace);
     std::string line;
@@ -742,11 +753,13 @@ inline bool hasAddressesFromOurModule(const Report& report) {
                 std::string addrStr = line.substr(pos, endPos - pos);
                 try {
                     unsigned long long addr = std::stoull(addrStr, nullptr, 16);
-                    if (addr >= loadAddr && addr < moduleEnd) {
+                    const bool ours = addr >= loadAddr && addr < moduleEnd;
+                    if (!ours) {
+                        inHook = false;
+                    } else if (!inHook) {
                         framesFromOurModule++;
-                        // Need at least 2 frames from our module
-                        // (1 is always the crash handler itself)
-                        if (framesFromOurModule >= 2) {
+                        // Signal records: 2 frames, 1 is always the crash handler itself
+                        if (framesFromOurModule >= framesNeeded) {
                             return true;
                         }
                     }
