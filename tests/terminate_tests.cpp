@@ -10,8 +10,13 @@
 #include <crtdbg.h>
 #endif
 
+#ifdef POSTHOG_TEST_FOREIGN_MODULE
+extern "C" void foreign_throw_on_thread();
+#endif
+
 namespace {
 std::string expectedMessage(const std::string& scenario) {
+    if (scenario == "foreign") return "foreign_boom_marker";
     if (scenario == "multiline") return "first line  SIGNAL: SIGSEGV";
     if (scenario == "unknown") return "Unknown exception";
     if (scenario == "explicit") return "std::terminate called";
@@ -19,6 +24,16 @@ std::string expectedMessage(const std::string& scenario) {
     if (scenario == "long") return std::string(1023, 'x');
     if (scenario == "unicode") return std::string(1022, 'x');
     return "uncaught_boom_marker";
+}
+
+// libc++abi's std::terminate keeps no frame record, so the frame-pointer
+// backtrace taken in the hook skips its direct caller. Called straight from
+// main, the report has no frame of this program and cannot be told apart from
+// another module's. In a plugin terminate is called deeper; this keeps main.
+[[gnu::noinline]] void terminateFromPlugin() {
+    void (*volatile terminateNow)() = std::terminate;
+    terminateNow();
+    std::abort();  // not a tail call: this frame stays in the chain
 }
 
 void check(bool condition, const char* description) {
@@ -46,8 +61,11 @@ int main(int argc, char** argv) {
         check(!nlohmann::json(report->message).dump().empty(), "message cannot serialize to JSON");
         check(report->stacktrace.find("0x") != std::string::npos, "missing native frames");
         if (!native && scenario != "abort") {
-            check(PostHog::CrashHandler::hasAddressesFromOurModule(*report),
-                  "terminate report would be discarded by the module filter");
+            // The hook is process-wide: only an exception with our frames under it is ours
+            const bool ours = scenario != "foreign";
+            check(PostHog::CrashHandler::hasAddressesFromOurModule(*report) == ours,
+                  ours ? "terminate report would be discarded by the module filter"
+                       : "foreign terminate report would be attributed to our module");
         }
         check(report->timestamp.find_first_not_of("0123456789") == std::string::npos,
               "timestamp is not decimal");
@@ -73,7 +91,10 @@ int main(int argc, char** argv) {
         });
     }
     if (scenario == "abort") std::abort();
-    if (scenario == "explicit") std::terminate();
+#ifdef POSTHOG_TEST_FOREIGN_MODULE
+    if (scenario == "foreign") foreign_throw_on_thread();
+#endif
+    if (scenario == "explicit") terminateFromPlugin();
     if (scenario == "unknown") throw 42;
     if (scenario == "multiline") throw std::runtime_error("first line\r\nSIGNAL: SIGSEGV");
     if (scenario == "long") throw std::runtime_error(std::string(8192, 'x'));

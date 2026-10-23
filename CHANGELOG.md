@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.7.11] - 2026-10-24
+
+### Fixed
+- Stop attributing uncaught C++ exceptions from the host or other plugins to our module. On macOS and Linux the `std::terminate` hook is process-wide, and its own frames counted as ours in the module filter, so any terminate in the host was reported as a crash of the plugin. TERMINATE records now skip the hook's leading frames and need one module frame after them; signal and Windows exception records keep the previous rule.
+
+### Tests
+- Add a terminate scenario with an exception left uncaught on a thread of another shared library (Unix), and unit cases for hook-only and in-module TERMINATE stacks.
+- Call `std::terminate` from a nested function in the explicit scenario: libc++abi's `std::terminate` keeps no frame record, so the frame-pointer backtrace drops its direct caller, and a call straight from `main` left no frame of the program.
+
 ## [1.7.10] - 2026-10-17
 
 ### Fixed

@@ -18,7 +18,12 @@ add_executable(terminate_tests terminate_tests.cpp)
 target_link_libraries(terminate_tests PRIVATE posthog)
 set(terminate_scenarios exception multiline unknown explicit empty long unicode open_failure)
 if(UNIX)
-    list(APPEND terminate_scenarios abort)
+    list(APPEND terminate_scenarios abort foreign)
+    # MSVC keeps terminate handlers per thread, so a foreign thread never
+    # reaches ours there; on Unix the hook is process-wide.
+    add_library(foreign_thrower SHARED foreign_thrower.cpp)
+    target_link_libraries(terminate_tests PRIVATE foreign_thrower)
+    target_compile_definitions(terminate_tests PRIVATE POSTHOG_TEST_FOREIGN_MODULE=1)
 endif()
 if(WIN32)
     list(APPEND terminate_scenarios native no_filter)
